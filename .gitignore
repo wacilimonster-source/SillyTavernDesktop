@@ -1,0 +1,8 @@
+bin/
+obj/
+publish/
+release-out/
+.tools/
+.vs/
+*.user
+产品设计.md

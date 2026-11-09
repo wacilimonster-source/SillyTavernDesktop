@@ -1,0 +1,57 @@
+name: Release manager
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Verify version and check existing release
+        id: release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = ([xml](Get-Content 'SillyTavernTray.csproj' -Raw)).Project.PropertyGroup.Version
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw "Tag does not match project version." }
+          gh release view $env:GITHUB_REF_NAME --json tagName 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) { "exists=true" >> $env:GITHUB_OUTPUT } else { "exists=false" >> $env:GITHUB_OUTPUT }
+      - name: Run isolated tests
+        if: steps.release.outputs.exists != 'true'
+        shell: pwsh
+        run: |
+          dotnet publish SillyTavernTray.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:Version=1.0.1 -o "$env:RUNNER_TEMP/manager-new"
+          if ($LASTEXITCODE -ne 0) { throw 'Update fixture build failed.' }
+          dotnet publish SillyTavernTray.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:Version=1.0.0 -o "$env:RUNNER_TEMP/manager-old"
+          if ($LASTEXITCODE -ne 0) { throw 'Current-version fixture build failed.' }
+          $env:ST_TRAY_TEST_MANAGER_UPDATE_EXE = "$env:RUNNER_TEMP/manager-new/SillyTavernTray.exe"
+          $env:ST_TRAY_TEST_MANAGER_CURRENT_EXE = "$env:RUNNER_TEMP/manager-old/SillyTavernTray.exe"
+          dotnet run --project tests/TraySmokeTests/TraySmokeTests.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
+      - name: Build and package
+        if: steps.release.outputs.exists != 'true'
+        shell: pwsh
+        run: |
+          dotnet publish SillyTavernTray.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o release-out
+          if ($LASTEXITCODE -ne 0) { throw 'Publish failed.' }
+          Copy-Item -LiteralPath release-out/SillyTavernTray.exe -Destination release-out/SillyTavernTray-win-x64.exe
+          $hash = (Get-FileHash -LiteralPath release-out/SillyTavernTray-win-x64.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  SillyTavernTray-win-x64.exe" | Set-Content -LiteralPath release-out/SHA256SUMS.txt -Encoding utf8
+      - name: Publish GitHub Release
+        if: steps.release.outputs.exists != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME release-out/SillyTavernTray-win-x64.exe release-out/SHA256SUMS.txt --verify-tag --generate-notes --title "SillyTavern 管理器 $env:GITHUB_REF_NAME"
+          if ($LASTEXITCODE -ne 0) { throw 'Release creation failed.' }
