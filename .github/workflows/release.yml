@@ -54,5 +54,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create $env:GITHUB_REF_NAME release-out/SillyTavernTray-win-x64.exe release-out/SHA256SUMS.txt --verify-tag --generate-notes --title "SillyTavern 管理器 $env:GITHUB_REF_NAME"
+          gh release create $env:GITHUB_REF_NAME release-out/SillyTavernTray-win-x64.exe release-out/SHA256SUMS.txt --verify-tag --generate-notes --title "SillyTavern 托盘管理器 $env:GITHUB_REF_NAME"
           if ($LASTEXITCODE -ne 0) { throw 'Release creation failed.' }
