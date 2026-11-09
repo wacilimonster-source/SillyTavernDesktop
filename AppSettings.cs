@@ -9,6 +9,7 @@ internal sealed class AppSettings
     public bool StartServerOnLaunch { get; set; } = true;
     public bool OpenBrowserOnAutostart { get; set; }
     public bool AutoUpdateManager { get; set; } = true;
+    public bool AutoRestartServer { get; set; } = true;
 
     private static string FindDefaultInstallDirectory()
     {

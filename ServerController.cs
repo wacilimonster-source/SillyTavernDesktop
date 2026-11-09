@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.NetworkInformation;
 
@@ -23,6 +24,7 @@ internal sealed class ServerController
     public ServerState State { get { lock (sync) return state; } }
     public string Detail { get { lock (sync) return detail; } }
     public bool HasOwnedProcess { get { lock (sync) return child is { HasExited: false }; } }
+    public string? HeartbeatPath => Config is null ? null : Path.Combine(Config.DataRoot, "heartbeat.json");
 
     private void SetState(ServerState next, string message)
     {
@@ -58,7 +60,11 @@ internal sealed class ServerController
             return;
         }
         var node = CommandRunner.FindExecutable("node.exe")!;
-        var args = new List<string> { "server.js", "--listen" };
+        var args = new List<string>
+        {
+            "server.js", "--listen",
+            "--heartbeatInterval", WatchdogEvaluator.HeartbeatIntervalSeconds.ToString(CultureInfo.InvariantCulture)
+        };
         if (isAutostart) { args.Add("--browserLaunchEnabled"); args.Add(settings.OpenBrowserOnAutostart ? "true" : "false"); }
         var ready = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (sync) { listening = ready; expectedExit = false; }

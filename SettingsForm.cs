@@ -17,6 +17,7 @@ internal sealed class SettingsForm : ThemedForm
     private readonly ToggleSwitch start = new();
     private readonly ToggleSwitch browser = new();
     private readonly ToggleSwitch autoUpdate = new();
+    private readonly ToggleSwitch watchdog = new();
     private readonly ThemedLabel browserLabel = new() { Tone = LabelTone.Secondary, AutoSize = false, TextAlign = ContentAlignment.MiddleLeft };
     private readonly ThemedLabel updateStatus = new() { Tone = LabelTone.Secondary, AutoSize = false, Visible = false };
     private readonly ThemedButton checkManagerUpdate = new();
@@ -39,7 +40,7 @@ internal sealed class SettingsForm : ThemedForm
         MaximizeBox = false;
         _ = Handle;
         var scale = Math.Max(1f, DeviceDpi / 96f);
-        ClientSize = new Size((int)Math.Round(560 * scale), (int)Math.Round(680 * scale));
+        ClientSize = new Size((int)Math.Round(560 * scale), (int)Math.Round(710 * scale));
 
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, BackColor = Theme.Current.Background };
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, S(40)));
@@ -136,6 +137,10 @@ internal sealed class SettingsForm : ThemedForm
 
         start.Checked = settings.StartServerOnLaunch;
         AddToggleRow(new ThemedLabel(), "启动管理器后自动启动 SillyTavern", width, y, start);
+        y += S(38);
+
+        watchdog.Checked = settings.AutoRestartServer;
+        AddToggleRow(new ThemedLabel(), "服务崩溃或心跳超时后自动重启（看门狗）", width, y, watchdog);
         y += S(38);
 
         browser.Checked = settings.OpenBrowserOnAutostart;
@@ -301,7 +306,8 @@ internal sealed class SettingsForm : ThemedForm
                 InstallDirectory = path,
                 StartServerOnLaunch = start.Checked,
                 OpenBrowserOnAutostart = browser.Checked,
-                AutoUpdateManager = autoUpdate.Checked
+                AutoUpdateManager = autoUpdate.Checked,
+                AutoRestartServer = watchdog.Checked
             };
             var previousAutostart = ReadAutoStart();
             candidate.Save();
@@ -316,6 +322,7 @@ internal sealed class SettingsForm : ThemedForm
             settings.StartServerOnLaunch = candidate.StartServerOnLaunch;
             settings.OpenBrowserOnAutostart = candidate.OpenBrowserOnAutostart;
             settings.AutoUpdateManager = candidate.AutoUpdateManager;
+            settings.AutoRestartServer = candidate.AutoRestartServer;
             DialogResult = DialogResult.OK;
             Close();
         }

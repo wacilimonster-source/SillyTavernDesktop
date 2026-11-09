@@ -86,6 +86,7 @@ internal sealed class MainForm : ThemedForm
     private readonly ConcurrentQueue<string> queuedLines = new();
     private readonly List<string> logLines = new();
     private readonly System.Windows.Forms.Timer logTimer = new() { Interval = 200 };
+    private readonly System.Windows.Forms.Timer watchdogTimer = new() { Interval = 10_000 };
     private readonly System.Windows.Forms.Timer managerUpdateTimer = new() { Interval = 6 * 60 * 60 * 1000 };
     private readonly CancellationTokenSource managerUpdateLifetime = new();
     private CancellationTokenSource autoUpdateCheck = new();
@@ -96,6 +97,11 @@ internal sealed class MainForm : ThemedForm
     private Color lastTrayColor = Color.Empty;
     private BusyOperation busyOperation;
     private bool reallyClosing, stopSignalThread, pausedScroll, bannerDismissed, configReadFailed;
+    private readonly RestartLimiter watchdogLimiter = new();
+    private DateTime? runningSinceUtc;
+    private DateTime watchdogPausedUntilUtc = DateTime.MinValue;
+    private ServerState previousServerState = ServerState.Stopped;
+    private bool watchdogRestarting;
     private string branch = "未知";
     private PrimaryActionKind primaryKind;
 
@@ -215,6 +221,8 @@ internal sealed class MainForm : ThemedForm
         server.Changed += OnServerChanged;
         logTimer.Tick += (_, _) => FlushLogQueue();
         logTimer.Start();
+        watchdogTimer.Tick += (_, _) => CheckWatchdog();
+        watchdogTimer.Start();
         managerUpdateTimer.Tick += async (_, _) => await CheckManagerUpdateAsync(manual: false);
         RebuildLog();
         UpdateDisplay();
@@ -649,7 +657,8 @@ internal sealed class MainForm : ThemedForm
             InstallDirectory = path,
             StartServerOnLaunch = settings.StartServerOnLaunch,
             OpenBrowserOnAutostart = settings.OpenBrowserOnAutostart,
-            AutoUpdateManager = settings.AutoUpdateManager
+            AutoUpdateManager = settings.AutoUpdateManager,
+            AutoRestartServer = settings.AutoRestartServer
         };
         try { candidate.Save(); }
         catch (Exception ex) { ShowToast("无法保存设置：" + ex.Message, ToastKind.Error); return; }
@@ -756,11 +765,110 @@ internal sealed class MainForm : ThemedForm
 
     private void OnServerChanged()
     {
-        TryUi(() =>
+        // Capture the state on the background thread: queued UI callbacks must not
+        // observe a newer transition and skip a crash notification.
+        var observed = server.State;
+        var detail = server.Detail;
+        TryUi(() => HandleServerState(observed, detail));
+    }
+
+    private void HandleServerState(ServerState current, string detail)
+    {
+        var previous = previousServerState;
+        previousServerState = current;
+        if (current == ServerState.Running) runningSinceUtc = DateTime.UtcNow;
+        if (current == ServerState.Failed)
         {
-            if (server.State == ServerState.Failed) Notify("SillyTavern 已退出", server.Detail);
-            UpdateDisplay();
-        });
+            if (watchdogRestarting) { /* the auto-restart flow reports its own outcome */ }
+            else if (previous == ServerState.Running && settings.AutoRestartServer && !reallyClosing && busyOperation == BusyOperation.None)
+                BeginWatchdogRestart("检测到服务异常退出", delay: true);
+            else Notify("SillyTavern 已退出", detail);
+        }
+        UpdateDisplay();
+    }
+
+    private void CheckWatchdog()
+    {
+        if (reallyClosing || !settings.AutoRestartServer || watchdogRestarting || busyOperation != BusyOperation.None) return;
+        if (server.State != ServerState.Running || !server.HasOwnedProcess) return;
+        var now = DateTime.UtcNow;
+        if (now < watchdogPausedUntilUtc) return;
+        var heartbeat = server.HeartbeatPath;
+        if (string.IsNullOrEmpty(heartbeat)) return;
+        DateTime? lastWrite = null;
+        try { if (File.Exists(heartbeat)) lastWrite = File.GetLastWriteTimeUtc(heartbeat); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        var observation = WatchdogEvaluator.Evaluate(now, server.State, runningSinceUtc, lastWrite);
+        if (observation is not (WatchdogObservation.Stale or WatchdogObservation.Missing)) return;
+        var age = lastWrite is null ? "心跳文件缺失" : $"{Math.Max(0, (int)(now - lastWrite.Value).TotalSeconds)} 秒未更新";
+        BeginWatchdogRestart($"检测到服务无响应（{age}）", delay: false);
+    }
+
+    private bool BeginWatchdogRestart(string reason, bool delay)
+    {
+        if (reallyClosing || !settings.AutoRestartServer || watchdogRestarting || busyOperation != BusyOperation.None) return false;
+        var now = DateTime.UtcNow;
+        if (now < watchdogPausedUntilUtc) return false;
+        if (!watchdogLimiter.TryAcquire(now))
+        {
+            watchdogPausedUntilUtc = now + TimeSpan.FromMinutes(10);
+            log.Write("管理器", "看门狗：短时间内重启次数过多，已暂停自动重启 10 分钟。请检查日志或手动启动服务。");
+            Notify("看门狗已暂停", "短时间内重启次数过多，请检查日志或手动启动服务。");
+            return false;
+        }
+        watchdogRestarting = true;
+        log.Write("管理器", "看门狗：" + reason + "，准备自动重启服务。");
+        Notify("SillyTavern 正在自动重启", reason);
+        _ = AutoRestartAsync(delay);
+        return true;
+    }
+
+    private async Task AutoRestartAsync(bool delay)
+    {
+        try
+        {
+            if (delay) await Task.Delay(TimeSpan.FromSeconds(3));
+            if (reallyClosing || !settings.AutoRestartServer || busyOperation != BusyOperation.None) return;
+            if (server.HasOwnedProcess)
+            {
+                var stopped = false;
+                await RunExclusiveAsync(BusyOperation.Stopping,
+                    async () => { stopped = await server.StopAsync(() => Task.FromResult(StopDecision.Force)); },
+                    showErrors: false);
+                if (!stopped && server.HasOwnedProcess)
+                {
+                    log.Write("管理器", "看门狗：无法停止卡住的服务，跳过本次自动重启。");
+                    Notify("自动重启失败", "无法停止当前服务，请手动处理。");
+                    return;
+                }
+            }
+            await RunExclusiveAsync(BusyOperation.Starting, async () =>
+            {
+                await server.StartAsync();
+                branch = await maintenance.GetBranchAsync();
+            }, showErrors: false);
+            if (server.State is ServerState.Running or ServerState.Starting)
+            {
+                log.Write("管理器", "看门狗：服务已自动重启。");
+                Notify("SillyTavern 已自动重启", "看门狗检测到异常并恢复了服务。");
+            }
+            else
+            {
+                log.Write("管理器", "看门狗：自动重启未成功，" + server.Detail);
+                Notify("自动重启失败", server.Detail);
+            }
+        }
+        catch (Exception ex)
+        {
+            log.Write("管理器", "看门狗：自动重启失败：" + ex.Message);
+            Notify("自动重启失败", ex.Message);
+        }
+        finally
+        {
+            watchdogRestarting = false;
+            if (!IsDisposed) UpdateDisplay();
+        }
     }
 
     private ConfigurationState CurrentConfiguration()
@@ -1327,6 +1435,7 @@ internal sealed class MainForm : ThemedForm
             stopSignalThread = true;
             try { showSignal.Set(); } catch (ObjectDisposedException) { }
             logTimer.Stop(); logTimer.Dispose();
+            watchdogTimer.Stop(); watchdogTimer.Dispose();
             managerUpdateTimer.Stop(); managerUpdateTimer.Dispose();
             managerUpdateLifetime.Cancel(); autoUpdateCheck.Cancel(); managerUpdates?.Dispose();
             log.LineWritten -= OnLogLine; server.Changed -= OnServerChanged;

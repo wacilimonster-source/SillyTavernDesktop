@@ -103,6 +103,7 @@ internal static class TestProgram
             await VerifyProxyRoutingAsync(git, node, realNpm, work);
             VerifyReleaseParsing();
             VerifyAppStateMapping();
+            VerifyWatchdog();
             Console.WriteLine("PASS: manager release metadata and download origin validation");
 
             var settings = new AppSettings { InstallDirectory = work };
@@ -350,6 +351,25 @@ internal static class TestProgram
         Assert(configError.Tone == StatusTone.Error && configError.PrimaryKind == PrimaryActionKind.Retry, "configuration error state");
 
         Console.WriteLine("PASS: view state mapping covers running, stopped, busy, occupied, unconfigured and error");
+    }
+
+    private static void VerifyWatchdog()
+    {
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        Assert(WatchdogEvaluator.Evaluate(now, ServerState.Stopped, null, null) == WatchdogObservation.NotRunning, "watchdog ignores stopped server");
+        Assert(WatchdogEvaluator.Evaluate(now, ServerState.Starting, null, null) == WatchdogObservation.NotRunning, "watchdog ignores starting server");
+        var justStarted = now - TimeSpan.FromSeconds(5);
+        Assert(WatchdogEvaluator.Evaluate(now, ServerState.Running, justStarted, null) == WatchdogObservation.Grace, "watchdog startup grace");
+        var longRunning = now - TimeSpan.FromSeconds(120);
+        Assert(WatchdogEvaluator.Evaluate(now, ServerState.Running, longRunning, now - TimeSpan.FromSeconds(10)) == WatchdogObservation.Healthy, "watchdog healthy heartbeat");
+        Assert(WatchdogEvaluator.Evaluate(now, ServerState.Running, longRunning, now - TimeSpan.FromSeconds(90)) == WatchdogObservation.Stale, "watchdog stale heartbeat");
+        Assert(WatchdogEvaluator.Evaluate(now, ServerState.Running, longRunning, null) == WatchdogObservation.Missing, "watchdog missing heartbeat");
+
+        var limiter = new RestartLimiter { MaxAttempts = 3, Window = TimeSpan.FromMinutes(10) };
+        Assert(limiter.TryAcquire(now) && limiter.TryAcquire(now) && limiter.TryAcquire(now), "watchdog allows three restarts");
+        Assert(!limiter.TryAcquire(now), "watchdog blocks fourth restart");
+        Assert(limiter.TryAcquire(now + TimeSpan.FromMinutes(11)), "watchdog allows restart after window");
+        Console.WriteLine("PASS: watchdog heartbeat evaluation and restart limits");
     }
 
     private static void VerifyReleaseParsing()
