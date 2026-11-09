@@ -39,6 +39,7 @@ internal class RoundedPanel : Panel
     public int Radius { get; set; } = 10;
     public Color? FillColor { get; set; }
     public Color? BorderColor { get; set; }
+    public Color? BoardColor { get; set; }
     public int BorderWidth { get; set; } = 1;
 
     public RoundedPanel()
@@ -57,6 +58,7 @@ internal class RoundedPanel : Panel
 
     protected override void OnPaint(PaintEventArgs e)
     {
+        e.Graphics.Clear(BoardColor ?? Theme.Current.Background);
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         var bounds = new Rectangle(0, 0, Width - 1, Height - 1);
         var fill = FillColor ?? Theme.Current.Surface;

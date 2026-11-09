@@ -45,6 +45,8 @@ internal class ThemedButton : Control, IButtonControl
 
     protected override void OnPaint(PaintEventArgs e)
     {
+        using (var board = new SolidBrush(Backdrop ?? Theme.Current.Background))
+            e.Graphics.FillRectangle(board, ClientRectangle);
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         var p = Theme.Current;
         var scale = DeviceDpi / 96f;
@@ -218,11 +220,13 @@ internal sealed class ThemedIconButton : Control
 
     protected override void OnPaint(PaintEventArgs e)
     {
+        var backdrop = Backdrop ?? Theme.Current.Background;
+        using (var board = new SolidBrush(backdrop))
+            e.Graphics.FillRectangle(board, ClientRectangle);
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         var p = Theme.Current;
         var bounds = new Rectangle(0, 0, Width - 1, Height - 1);
         var radius = Draw.Scale(this, 6);
-        var backdrop = Backdrop ?? p.Background;
         var fill = hover ? (DangerHover ? p.DangerSoft : Draw.Blend(backdrop, p.TextPrimary, 0.08)) : backdrop;
         if (pressed && hover) fill = Draw.Blend(fill, p.TextPrimary, 0.06);
         Draw.FillRounded(e.Graphics, bounds, radius, fill);

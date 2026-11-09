@@ -20,6 +20,7 @@ internal sealed class ToggleSwitch : CheckBox
 
     protected override void OnPaint(PaintEventArgs e)
     {
+        e.Graphics.Clear(Theme.Current.Background);
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         var p = Theme.Current;
         var radius = Height / 2;
@@ -97,6 +98,7 @@ internal sealed class SegmentedControl : Control
 
     protected override void OnPaint(PaintEventArgs e)
     {
+        e.Graphics.Clear(Theme.Current.Background);
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         var p = Theme.Current;
         var radius = Draw.Scale(this, 7);
@@ -338,6 +340,7 @@ internal sealed class AddressPicker : Control
 
     protected override void OnPaint(PaintEventArgs e)
     {
+        e.Graphics.Clear(Theme.Current.Background);
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         var p = Theme.Current;
         var bounds = new Rectangle(0, 0, Width - 1, Height - 1);

@@ -796,6 +796,7 @@ internal sealed class MainForm : ThemedForm
             : state.Tone == StatusTone.Error ? LabelTone.Danger : LabelTone.Warning;
 
         primaryKind = state.PrimaryKind;
+        primaryButton.Backdrop = p.ToneSurface(state.Tone);
         primaryButton.Visible = !state.ShowProgress && state.PrimaryKind != PrimaryActionKind.None;
         if (primaryButton.Visible)
         {
