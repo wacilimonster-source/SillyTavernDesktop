@@ -26,6 +26,7 @@ jobs:
           if ($env:GITHUB_REF_NAME -ne "v$version") { throw "Tag does not match project version." }
           gh release view $env:GITHUB_REF_NAME --json tagName 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) { "exists=true" >> $env:GITHUB_OUTPUT } else { "exists=false" >> $env:GITHUB_OUTPUT }
+          exit 0
       - name: Run isolated tests
         if: steps.release.outputs.exists != 'true'
         shell: pwsh

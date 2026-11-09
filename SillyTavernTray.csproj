@@ -8,7 +8,7 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>SillyTavernTray</AssemblyName>
     <RootNamespace>SillyTavernTray</RootNamespace>
-    <Version>1.0.1</Version>
+    <Version>1.0.2</Version>
     <ApplicationIcon>assets\tray.ico</ApplicationIcon>
     <DefaultItemExcludes>$(DefaultItemExcludes);.tools\**</DefaultItemExcludes>
   </PropertyGroup>
