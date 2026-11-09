@@ -8,9 +8,11 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>SillyTavernTray</AssemblyName>
     <RootNamespace>SillyTavernTray</RootNamespace>
-    <Version>1.0.2</Version>
+    <Version>1.1.0</Version>
     <ApplicationIcon>assets\tray.ico</ApplicationIcon>
     <DefaultItemExcludes>$(DefaultItemExcludes);.tools\**</DefaultItemExcludes>
+    <!-- Custom controls are built entirely in code; they never use the WinForms designer. -->
+    <NoWarn>$(NoWarn);WFO1000</NoWarn>
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="tests\**\*.cs" />

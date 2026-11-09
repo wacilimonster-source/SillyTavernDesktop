@@ -48,6 +48,12 @@ internal static class Program
         }
         catch (Exception ex)
         {
+            try
+            {
+                Directory.CreateDirectory(AppSettings.DataDirectory);
+                File.WriteAllText(Path.Combine(AppSettings.DataDirectory, "startup-error.txt"), ex.ToString());
+            }
+            catch { }
             MessageBox.Show(ex.Message, "SillyTavern 管理器", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 1;
         }

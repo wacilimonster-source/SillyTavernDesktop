@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Diagnostics;
 using SillyTavernTray;
+using SillyTavernTray.Ui;
 using Microsoft.Win32;
 
 internal static class TestProgram
@@ -101,6 +102,7 @@ internal static class TestProgram
 
             await VerifyProxyRoutingAsync(git, node, realNpm, work);
             VerifyReleaseParsing();
+            VerifyAppStateMapping();
             Console.WriteLine("PASS: manager release metadata and download origin validation");
 
             var settings = new AppSettings { InstallDirectory = work };
@@ -323,6 +325,31 @@ internal static class TestProgram
         if (expected is null) return configured is "" or "false" or "null";
         return Uri.TryCreate(configured, UriKind.Absolute, out var actual) &&
             actual.Scheme == expected.Scheme && actual.Host.Equals(expected.Host, StringComparison.OrdinalIgnoreCase) && actual.Port == expected.Port;
+    }
+
+    private static void VerifyAppStateMapping()
+    {
+        var running = AppStateFactory.Compute(ServerState.Running, true, BusyOperation.None, ConfigurationState.Configured, "运行中", "meta");
+        Assert(running.Tone == StatusTone.Running && running.PrimaryKind == PrimaryActionKind.OpenServer && running.AddressEnabled, "running primary state");
+        Assert(running.Actions.Any(a => a.Kind == ViewActionKind.Stop), "running stop action");
+
+        var stopped = AppStateFactory.Compute(ServerState.Stopped, false, BusyOperation.None, ConfigurationState.Configured, "未运行", "meta");
+        Assert(stopped.Tone == StatusTone.Stopped && stopped.PrimaryKind == PrimaryActionKind.Start, "stopped primary state");
+        Assert(stopped.Actions.Count == 1 && !stopped.Actions[0].Enabled, "stopped open action disabled");
+
+        var busy = AppStateFactory.Compute(ServerState.Starting, false, BusyOperation.Starting, ConfigurationState.Configured, "正在启动", "meta");
+        Assert(busy.Tone == StatusTone.Busy && busy.ShowProgress && busy.PrimaryKind == PrimaryActionKind.None, "busy progress state");
+
+        var occupied = AppStateFactory.Compute(ServerState.Occupied, false, BusyOperation.None, ConfigurationState.Configured, "端口 8000 已被占用", "meta");
+        Assert(occupied.Tone == StatusTone.Error && occupied.PrimaryKind == PrimaryActionKind.Retry, "occupied retry state");
+
+        var unconfigured = AppStateFactory.Compute(ServerState.Stopped, false, BusyOperation.None, ConfigurationState.Unconfigured, "未运行", "meta");
+        Assert(unconfigured.OnboardingVisible && unconfigured.PrimaryKind == PrimaryActionKind.ChooseDirectory, "unconfigured onboarding state");
+
+        var configError = AppStateFactory.Compute(ServerState.Stopped, false, BusyOperation.None, ConfigurationState.Error, "读取失败", "meta");
+        Assert(configError.Tone == StatusTone.Error && configError.PrimaryKind == PrimaryActionKind.Retry, "configuration error state");
+
+        Console.WriteLine("PASS: view state mapping covers running, stopped, busy, occupied, unconfigured and error");
     }
 
     private static void VerifyReleaseParsing()
