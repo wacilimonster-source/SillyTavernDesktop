@@ -13,6 +13,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
@@ -25,8 +27,14 @@ jobs:
           $version = ([xml](Get-Content 'SillyTavernTray.csproj' -Raw)).Project.PropertyGroup.Version
           if ($env:GITHUB_REF_NAME -ne "v$version") { throw "Tag does not match project version." }
           gh release view $env:GITHUB_REF_NAME --json tagName 2>$null | Out-Null
-          if ($LASTEXITCODE -eq 0) { "exists=true" >> $env:GITHUB_OUTPUT } else { "exists=false" >> $env:GITHUB_OUTPUT }
-          exit 0
+          if ($LASTEXITCODE -eq 0) {
+            "exists=true" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          "exists=false" >> $env:GITHUB_OUTPUT
+          $section = Select-String -Path 'CHANGELOG.md' -Pattern '^## \[([0-9]+\.[0-9]+\.[0-9]+)\]' |
+            Where-Object { $_.Matches[0].Groups[1].Value -eq $version }
+          if (-not $section) { throw "CHANGELOG.md is missing the $version section." }
       - name: Run isolated tests
         if: steps.release.outputs.exists != 'true'
         shell: pwsh
@@ -40,6 +48,7 @@ jobs:
           dotnet run --project tests/TraySmokeTests/TraySmokeTests.csproj -c Release
           if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
       - name: Build and package
+        id: package
         if: steps.release.outputs.exists != 'true'
         shell: pwsh
         run: |
@@ -48,11 +57,16 @@ jobs:
           Copy-Item -LiteralPath release-out/SillyTavernTray.exe -Destination release-out/SillyTavernTray-win-x64.exe
           $hash = (Get-FileHash -LiteralPath release-out/SillyTavernTray-win-x64.exe -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  SillyTavernTray-win-x64.exe" | Set-Content -LiteralPath release-out/SHA256SUMS.txt -Encoding utf8
+          "hash=$hash" >> $env:GITHUB_OUTPUT
       - name: Publish GitHub Release
         if: steps.release.outputs.exists != 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_HASH: ${{ steps.package.outputs.hash }}
         run: |
-          gh release create $env:GITHUB_REF_NAME release-out/SillyTavernTray-win-x64.exe release-out/SHA256SUMS.txt --verify-tag --generate-notes --title "SillyTavern 托盘管理器 $env:GITHUB_REF_NAME"
+          $version = ([xml](Get-Content 'SillyTavernTray.csproj' -Raw)).Project.PropertyGroup.Version
+          $notesPath = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          ./.github/scripts/build-release-notes.ps1 -Tag $env:GITHUB_REF_NAME -Version $version -Hash $env:RELEASE_HASH -ExePath 'release-out/SillyTavernTray-win-x64.exe' -OutputPath $notesPath
+          gh release create $env:GITHUB_REF_NAME release-out/SillyTavernTray-win-x64.exe release-out/SHA256SUMS.txt --verify-tag --notes-file $notesPath --title "SillyTavern 托盘管理器 $env:GITHUB_REF_NAME"
           if ($LASTEXITCODE -ne 0) { throw 'Release creation failed.' }

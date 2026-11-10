@@ -10,6 +10,9 @@
 
 <p align="center">
   <a href="https://github.com/wacilimonster-source/SillyTavernDesktop/releases/latest"><img src="https://img.shields.io/github/v/release/wacilimonster-source/SillyTavernDesktop?label=release" alt="Release"></a>
+  <a href="https://github.com/wacilimonster-source/SillyTavernDesktop/releases"><img src="https://img.shields.io/github/downloads/wacilimonster-source/SillyTavernDesktop/total?label=downloads&color=2EA043" alt="Downloads"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/wacilimonster-source/SillyTavernDesktop?label=license&color=2EA043" alt="License"></a>
+  <a href="https://github.com/wacilimonster-source/SillyTavernDesktop/actions/workflows/release.yml"><img src="https://github.com/wacilimonster-source/SillyTavernDesktop/actions/workflows/release.yml/badge.svg" alt="Release workflow"></a>
   <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4" alt="Platform">
   <img src="https://img.shields.io/badge/.NET-10-512BD4" alt=".NET">
   <img src="https://img.shields.io/badge/UI-light%20%26%20dark-3B5BDB" alt="Theme">
@@ -104,11 +107,15 @@ dotnet publish 'SillyTavernTray.csproj' -c Release -r win-x64 --self-contained t
 
 发布文件是自包含的 Windows x64 程序，不要求目标电脑另行安装 .NET；仍需要可用的 Node.js、npm 和 Git。测试使用临时目录、临时 Git 仓库和隔离的注册表键，不操作实际 SillyTavern 安装或真正的登录启动项。
 
-发布新版本时，先更新 `SillyTavernTray.csproj` 的 `Version`、提交并推送，再创建并推送匹配的 `v版本号` 标签；GitHub Actions 会构建并发布 Windows x64 程序。自动更新只读取正式 Release，要求资产名为 `SillyTavernTray-win-x64.exe`，并校验 GitHub 提供的资产 SHA-256。
+发布新版本时，先在 `CHANGELOG.md` 写入对应版本的小节（发布说明会据此生成），再更新 `SillyTavernTray.csproj` 的 `Version`、提交并推送，最后创建并推送匹配的 `v版本号` 标签。GitHub Actions 会构建并发布 Windows x64 程序，发布说明由 `CHANGELOG.md` 对应小节和 `.github/release-notes-*.md` 自动生成。自动更新只读取正式 Release，要求资产名为 `SillyTavernTray-win-x64.exe`，并校验 GitHub 提供的资产 SHA-256。
 
 ## English
 
 A lightweight Windows tray manager for SillyTavern. It starts/stops/restarts your existing install, opens the web UI, copies LAN addresses, runs the official Git/npm update and dependency repair, and keeps logs in one place — without modifying your SillyTavern configuration or taking over processes it did not start. Self-contained single-file build; light/dark Windows 11-style UI.
+
+## 许可证
+
+本项目以 [MIT License](LICENSE) 发布。
 
 ## 致谢
 
