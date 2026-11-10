@@ -24,10 +24,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $version = ([xml](Get-Content 'SillyTavernTray.csproj' -Raw)).Project.PropertyGroup.Version
+          $ErrorActionPreference = 'Stop'
+          $version = [string]([xml](Get-Content 'SillyTavernTray.csproj' -Raw)).Project.PropertyGroup.Version
+          Write-Host "Tag=$env:GITHUB_REF_NAME Version=$version"
           if ($env:GITHUB_REF_NAME -ne "v$version") { throw "Tag does not match project version." }
-          gh release view $env:GITHUB_REF_NAME --json tagName 2>$null | Out-Null
-          if ($LASTEXITCODE -eq 0) {
+          $exists = $false
+          try {
+            gh release view $env:GITHUB_REF_NAME --json tagName 2>$null | Out-Null
+            $exists = ($LASTEXITCODE -eq 0)
+          } catch {
+            $exists = $false
+          }
+          if ($exists) {
             "exists=true" >> $env:GITHUB_OUTPUT
             exit 0
           }
@@ -35,6 +43,7 @@ jobs:
           $section = Select-String -Path 'CHANGELOG.md' -Pattern '^## \[([0-9]+\.[0-9]+\.[0-9]+)\]' |
             Where-Object { $_.Matches[0].Groups[1].Value -eq $version }
           if (-not $section) { throw "CHANGELOG.md is missing the $version section." }
+          Write-Host "CHANGELOG section for $version found."
       - name: Run isolated tests
         if: steps.release.outputs.exists != 'true'
         shell: pwsh
