@@ -23,7 +23,8 @@ internal static class CommandRunner
 
     public static async Task<CommandResult> RunAsync(string executable, IEnumerable<string> args, string directory,
         Action<string>? onOutput = null, bool production = false, string? rawArguments = null,
-        IReadOnlyDictionary<string, string>? environment = null)
+        IReadOnlyDictionary<string, string>? environment = null,
+        CancellationToken cancellation = default, TimeSpan? timeout = null)
     {
         var info = new ProcessStartInfo(executable)
         {
@@ -51,7 +52,21 @@ internal static class CommandRunner
         }
         var outTask = Pump(process.StandardOutput, output);
         var errorTask = Pump(process.StandardError, error);
-        await process.WaitForExitAsync();
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+        if (timeout is { } limit) linked.CancelAfter(limit);
+        try
+        {
+            await process.WaitForExitAsync(linked.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            // A hung git/npm/node command must not leave the manager stuck forever.
+            try { process.Kill(entireProcessTree: true); } catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+            try { await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); } catch (Exception) { }
+            try { await Task.WhenAll(outTask, errorTask).WaitAsync(TimeSpan.FromSeconds(2)); } catch (Exception) { }
+            if (cancellation.IsCancellationRequested) throw;
+            throw new TimeoutException($"命令 {Path.GetFileName(executable)} 超时（{timeout?.TotalSeconds ?? 0:F0} 秒）。");
+        }
         await Task.WhenAll(outTask, errorTask);
         return new CommandResult(process.ExitCode, output.ToString(), error.ToString());
     }
@@ -60,14 +75,15 @@ internal static class CommandRunner
         IReadOnlyDictionary<string, string>? environment = null)
     {
         const string args = "install --no-save --no-audit --no-fund --loglevel=error --no-progress --omit=dev --ignore-scripts";
-        return RunNpmAsync(npm, directory, args, onOutput, production: true, environment);
+        return RunNpmAsync(npm, directory, args, onOutput, production: true, environment, timeout: TimeSpan.FromMinutes(30));
     }
 
     public static Task<CommandResult> GetNpmRegistryAsync(string npm, string directory) =>
-        RunNpmAsync(npm, directory, "config get registry", null, production: false, environment: null);
+        RunNpmAsync(npm, directory, "config get registry", null, production: false, environment: null,
+            timeout: TimeSpan.FromSeconds(30));
 
     private static Task<CommandResult> RunNpmAsync(string npm, string directory, string arguments, Action<string>? onOutput,
-        bool production, IReadOnlyDictionary<string, string>? environment)
+        bool production, IReadOnlyDictionary<string, string>? environment, TimeSpan? timeout = null)
     {
         // The arguments are fixed by this program. The path is expanded once from an environment variable by cmd.exe.
         var command = $"/d /s /c \"\"%ST_TRAY_NPM_PATH%\" {arguments}\"";
@@ -76,6 +92,6 @@ internal static class CommandRunner
             : new Dictionary<string, string>(environment, StringComparer.OrdinalIgnoreCase);
         childEnvironment["ST_TRAY_NPM_PATH"] = npm;
         return RunAsync(Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe", [], directory, onOutput, production: production,
-            rawArguments: command, environment: childEnvironment);
+            rawArguments: command, environment: childEnvironment, timeout: timeout);
     }
 }

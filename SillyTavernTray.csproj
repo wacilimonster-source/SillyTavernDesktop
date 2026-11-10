@@ -8,7 +8,7 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>SillyTavernTray</AssemblyName>
     <RootNamespace>SillyTavernTray</RootNamespace>
-    <Version>1.2.0</Version>
+    <Version>1.2.1</Version>
     <ApplicationIcon>assets\tray.ico</ApplicationIcon>
     <DefaultItemExcludes>$(DefaultItemExcludes);.tools\**</DefaultItemExcludes>
     <!-- Custom controls are built entirely in code; they never use the WinForms designer. -->

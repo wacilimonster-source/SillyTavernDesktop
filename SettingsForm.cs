@@ -7,6 +7,8 @@ internal sealed class SettingsForm : ThemedForm
 {
     private readonly AppSettings settings;
     private readonly bool serviceRunning;
+    private readonly Func<bool>? isServiceRunning;
+    private readonly CancellationTokenSource lifetime = new();
 
     private readonly Panel body;
     private readonly Panel footer;
@@ -26,11 +28,12 @@ internal sealed class SettingsForm : ThemedForm
 
     static SettingsForm() { Theme.Initialize(); }
 
-    public SettingsForm(AppSettings settings, bool serviceRunning)
+    public SettingsForm(AppSettings settings, bool serviceRunning, Func<bool>? isServiceRunning = null)
         : base(resizable: false)
     {
         this.settings = settings;
         this.serviceRunning = serviceRunning;
+        this.isServiceRunning = isServiceRunning;
         Theme.Initialize();
         Text = "设置";
         Font = Typography.Body;
@@ -40,7 +43,11 @@ internal sealed class SettingsForm : ThemedForm
         MaximizeBox = false;
         _ = Handle;
         var scale = Math.Max(1f, DeviceDpi / 96f);
-        ClientSize = new Size((int)Math.Round(560 * scale), (int)Math.Round(710 * scale));
+        var area = Screen.FromPoint(Cursor.Position).WorkingArea;
+        ClientSize = new Size(
+            Math.Min((int)Math.Round(560 * scale), Math.Max(S(320), area.Width - S(24))),
+            Math.Min((int)Math.Round(710 * scale), Math.Max(S(320), area.Height - S(24))));
+        FormClosed += (_, _) => lifetime.Cancel();
 
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, BackColor = Theme.Current.Background };
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, S(40)));
@@ -268,19 +275,25 @@ internal sealed class SettingsForm : ThemedForm
         try
         {
             using var service = new ManagerUpdateService(new AppLog());
-            var result = await service.CheckAsync(manual: true);
+            var result = await service.CheckAsync(manual: true, lifetime.Token);
+            if (IsDisposed) return;
             updateStatus.Text = result;
             updateStatus.Tone = result.Contains("失败", StringComparison.Ordinal) ? LabelTone.Danger : LabelTone.Secondary;
         }
+        catch (OperationCanceledException) { }
         catch (Exception ex)
         {
+            if (IsDisposed) return;
             updateStatus.Text = "检查失败：" + ex.Message;
             updateStatus.Tone = LabelTone.Danger;
         }
         finally
         {
-            checkManagerUpdate.Enabled = true;
-            checkManagerUpdate.Text = "检查管理器更新";
+            if (!IsDisposed)
+            {
+                checkManagerUpdate.Enabled = true;
+                checkManagerUpdate.Text = "检查管理器更新";
+            }
         }
     }
 
@@ -296,7 +309,7 @@ internal sealed class SettingsForm : ThemedForm
                 directory.InnerBox.Focus();
                 return;
             }
-            if (serviceRunning && !string.Equals(path.TrimEnd(Path.DirectorySeparatorChar), settings.InstallDirectory.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
+            if ((isServiceRunning?.Invoke() ?? serviceRunning) && !string.Equals(path.TrimEnd(Path.DirectorySeparatorChar), settings.InstallDirectory.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
             {
                 ShowError("请先停止当前服务，再更换安装目录。");
                 return;
@@ -347,5 +360,15 @@ internal sealed class SettingsForm : ThemedForm
         body.BackColor = p.Background;
         footer.BackColor = p.Background;
         foreach (var divider in dividers) divider.BackColor = p.Border;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            lifetime.Cancel();
+            lifetime.Dispose();
+        }
+        base.Dispose(disposing);
     }
 }

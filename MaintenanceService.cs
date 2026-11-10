@@ -11,7 +11,8 @@ internal sealed class MaintenanceService
 
     private string DirectoryPath => settings.InstallDirectory;
     private string Git => CommandRunner.FindExecutable("git.exe") ?? throw new InvalidOperationException("未找到 Git，请检查 PATH。");
-    private Task<CommandResult> GitAsync(params string[] args) => CommandRunner.RunAsync(Git, args, DirectoryPath);
+    private Task<CommandResult> GitAsync(params string[] args) =>
+        CommandRunner.RunAsync(Git, args, DirectoryPath, timeout: TimeSpan.FromSeconds(30));
     private static string ErrorText(CommandResult result) => string.IsNullOrWhiteSpace(result.Error) ? result.Output.Trim() : result.Error.Trim();
 
     public async Task<string> GetBranchAsync()
@@ -52,7 +53,8 @@ internal sealed class MaintenanceService
         await CheckRepositoryAsync(requireClean: false);
         var proxy = await GitProxyEnvironmentAsync();
         log.Write("维护", "检查更新：git fetch");
-        var fetch = await CommandRunner.RunAsync(Git, ["fetch"], DirectoryPath, s => log.Write("维护", s), environment: proxy);
+        var fetch = await CommandRunner.RunAsync(Git, ["fetch"], DirectoryPath, s => log.Write("维护", s), environment: proxy,
+            timeout: TimeSpan.FromMinutes(5));
         if (fetch.ExitCode != 0) throw new InvalidOperationException("检查更新失败：" + ErrorText(fetch));
         var result = await GitAsync("rev-list", "--left-right", "--count", "HEAD...@{u}");
         var counts = result.Output.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
@@ -85,7 +87,8 @@ internal sealed class MaintenanceService
         var npmProxy = await NpmProxyEnvironmentAsync(npm);
         await EnsureStoppedAndPortFreeAsync(ask);
         log.Write("维护", "开始更新：git pull --rebase --autostash");
-        var pull = await CommandRunner.RunAsync(Git, ["pull", "--rebase", "--autostash"], DirectoryPath, s => log.Write("维护", s), environment: gitProxy);
+        var pull = await CommandRunner.RunAsync(Git, ["pull", "--rebase", "--autostash"], DirectoryPath, s => log.Write("维护", s), environment: gitProxy,
+            timeout: TimeSpan.FromMinutes(15));
         if (pull.ExitCode != 0) throw new InvalidOperationException("Git 更新失败，服务保持停止。\n" + ErrorText(pull));
         await InstallDependenciesAsync(npm, npmProxy);
         log.Write("维护", "更新完成，正在重新启动服务。");

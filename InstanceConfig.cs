@@ -7,6 +7,10 @@ internal sealed record InstanceConfig(int Port, bool Ssl, bool Ipv4, bool Ipv6, 
 {
     public string LocalUrl => $"{(Ssl ? "https" : "http")}://{(Ipv4 ? "127.0.0.1" : "[::1]")}:{Port}/";
 
+    /// <summary>Heartbeat files were introduced in SillyTavern 1.16.0.</summary>
+    public bool SupportsHeartbeat =>
+        System.Version.TryParse(Version.TrimStart('v', 'V'), out var parsed) && parsed >= new Version(1, 16, 0);
+
     public static async Task<InstanceConfig> LoadAsync(string directory, string node)
     {
         const string script = """
@@ -65,7 +69,7 @@ internal sealed record InstanceConfig(int Port, bool Ssl, bool Ipv4, bool Ipv6, 
                 dataRoot: String(env('SILLYTAVERN_DATAROOT', val('dataRoot','./data'))) };
             process.stdout.write(JSON.stringify(info));
             """;
-        var result = await CommandRunner.RunAsync(node, ["-e", script], directory);
+        var result = await CommandRunner.RunAsync(node, ["-e", script], directory, timeout: TimeSpan.FromSeconds(30));
         if (result.ExitCode != 0) throw new InvalidOperationException("无法读取 SillyTavern 配置，请检查 Node.js 和项目依赖。\n" + result.Error.Trim());
         using var json = JsonDocument.Parse(result.Output);
         var root = json.RootElement;

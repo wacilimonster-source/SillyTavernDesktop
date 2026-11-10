@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Globalization;
+using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
@@ -86,6 +87,7 @@ internal sealed class MainForm : ThemedForm
     private readonly ConcurrentQueue<string> queuedLines = new();
     private readonly List<string> logLines = new();
     private readonly System.Windows.Forms.Timer logTimer = new() { Interval = 200 };
+    private readonly System.Windows.Forms.Timer logSearchTimer = new() { Interval = 220 };
     private readonly System.Windows.Forms.Timer watchdogTimer = new() { Interval = 10_000 };
     private readonly System.Windows.Forms.Timer managerUpdateTimer = new() { Interval = 6 * 60 * 60 * 1000 };
     private readonly CancellationTokenSource managerUpdateLifetime = new();
@@ -97,6 +99,7 @@ internal sealed class MainForm : ThemedForm
     private Color lastTrayColor = Color.Empty;
     private BusyOperation busyOperation;
     private bool reallyClosing, stopSignalThread, pausedScroll, bannerDismissed, configReadFailed;
+    private bool hiddenToTray, heartbeatUnavailableLogged;
     private readonly RestartLimiter watchdogLimiter = new();
     private DateTime? runningSinceUtc;
     private DateTime watchdogPausedUntilUtc = DateTime.MinValue;
@@ -113,6 +116,7 @@ internal sealed class MainForm : ThemedForm
         this.showSignal = showSignal;
         Theme.Initialize();
         settings = AppSettings.Load();
+        if (AppSettings.RecoveryNotice is { } recovery) log.Write("管理器", recovery);
         server = new ServerController(settings, log);
         maintenance = new MaintenanceService(settings, log, server);
 
@@ -124,8 +128,15 @@ internal sealed class MainForm : ThemedForm
         Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? (Icon)SystemIcons.Application.Clone();
         _ = Handle;
         var scale = DeviceDpi / 96f;
-        ClientSize = new Size((int)Math.Round(720 * scale), (int)Math.Round(560 * scale));
-        MinimumSize = new Size((int)Math.Round(600 * scale), (int)Math.Round(480 * scale));
+        var area = (Screen.PrimaryScreen ?? Screen.FromControl(this)).WorkingArea;
+        var maxWidth = Math.Max(S(400), area.Width - S(24));
+        var maxHeight = Math.Max(S(320), area.Height - S(24));
+        MinimumSize = new Size(
+            Math.Min((int)Math.Round(600 * scale), maxWidth),
+            Math.Min((int)Math.Round(480 * scale), maxHeight));
+        ClientSize = new Size(
+            Math.Min((int)Math.Round(720 * scale), maxWidth),
+            Math.Min((int)Math.Round(560 * scale), maxHeight));
         PositionAtBottomRight();
         if (autoStarted) Opacity = 0;
 
@@ -163,7 +174,7 @@ internal sealed class MainForm : ThemedForm
         banner = new RoundedPanel { Dock = DockStyle.Fill, Radius = S(8), FillColor = Theme.Current.AccentSoft, BorderColor = Draw.Blend(Theme.Current.Accent, Theme.Current.Border, 0.7f), Padding = new Padding(S(14), S(8), S(8), S(8)), Visible = false };
         bannerLabel = new ThemedLabel { Tone = LabelTone.Secondary, Dock = DockStyle.Fill, AutoSize = false, TextAlign = ContentAlignment.MiddleLeft, BackColor = Color.Transparent };
         bannerAction = new ThemedButton { Text = "立即重启并更新", Variant = ButtonVariant.Quiet, PreferredHeight = 28, IconGlyph = Icons.Power, Backdrop = Theme.Current.AccentSoft };
-        bannerAction.Click += async (_, _) => await ExitAsync();
+        bannerAction.Click += async (_, _) => await ExitAsync(restartAfterInstall: true);
         bannerClose = new ThemedIconButton { Glyph = Icons.Close, GlyphSize = 12, Size = new Size(S(28), S(28)), Backdrop = Theme.Current.AccentSoft, Text = "忽略管理器更新提示" };
         bannerClose.AccessibleName = "忽略管理器更新提示";
         bannerClose.Click += (_, _) => { bannerDismissed = true; UpdateDisplay(); };
@@ -231,7 +242,7 @@ internal sealed class MainForm : ThemedForm
         {
             PositionAtBottomRight();
             PositionToast();
-            if (autoStarted) { Hide(); Opacity = 1; }
+            if (autoStarted) { HideToTray(); Opacity = 1; }
             await InitializeAsync();
             if (settings.AutoUpdateManager)
             {
@@ -415,7 +426,8 @@ internal sealed class MainForm : ThemedForm
         logSources.Width = logSources.MeasureWidth();
         logSources.Margin = new Padding(0, S(3), S(4), 0);
         logSources.SelectedIndexChanged += (_, _) => RebuildLog();
-        logSearch.TextChanged += (_, _) => RebuildLog();
+        logSearch.TextChanged += (_, _) => { logSearchTimer.Stop(); logSearchTimer.Start(); };
+        logSearchTimer.Tick += (_, _) => { logSearchTimer.Stop(); RebuildLog(); };
         tools.Controls.Add(openLogButton);
         tools.Controls.Add(copyLogButton);
         tools.Controls.Add(pauseButton);
@@ -554,6 +566,12 @@ internal sealed class MainForm : ThemedForm
             log.Write("管理器更新", "上次自动安装失败，可从托盘手动检查管理器更新后重试。");
             Notify("管理器更新未安装", "请查看日志，或从托盘手动检查管理器更新。");
         }
+        if (CurrentConfiguration() == ConfigurationState.Unconfigured)
+        {
+            configReadFailed = false;
+            UpdateDisplay();
+            return;
+        }
         await RunExclusiveAsync(BusyOperation.ReadingConfig, async () =>
         {
             if (settings.StartServerOnLaunch) await server.StartAsync(autoStarted);
@@ -633,7 +651,11 @@ internal sealed class MainForm : ThemedForm
         {
             case PrimaryActionKind.OpenServer: OpenServer(); break;
             case PrimaryActionKind.Start: await StartOrStopAsync(); break;
-            case PrimaryActionKind.Retry: await RefreshEnvironmentAsync(); break;
+            case PrimaryActionKind.Retry:
+                // In the occupied state "retry" must re-check the port and start when it is free.
+                if (server.State == ServerState.Occupied) await StartOrStopAsync();
+                else await RefreshEnvironmentAsync();
+                break;
             case PrimaryActionKind.ChooseDirectory: await ChooseInstallDirectoryAsync(); break;
         }
     }
@@ -727,7 +749,7 @@ internal sealed class MainForm : ThemedForm
         });
     }
 
-    private async Task ExitAsync()
+    private async Task ExitAsync(bool restartAfterInstall = false)
     {
         if (busyOperation != BusyOperation.None)
         {
@@ -742,7 +764,7 @@ internal sealed class MainForm : ThemedForm
         if (!canClose) return;
         managerUpdateLifetime.Cancel();
         var updateReady = managerUpdates is null || await managerUpdates.PrepareForExitAsync();
-        if (updateReady) ManagerUpdateInstaller.TryLaunch(restart: false, autostart: false);
+        if (updateReady) ManagerUpdateInstaller.TryLaunch(restart: restartAfterInstall, autostart: false);
         reallyClosing = true;
         Close();
     }
@@ -750,7 +772,7 @@ internal sealed class MainForm : ThemedForm
     private void ShowSettings()
     {
         if (busyOperation != BusyOperation.None) return;
-        using var dialog = new SettingsForm(settings, server.HasOwnedProcess);
+        using var dialog = new SettingsForm(settings, server.HasOwnedProcess, () => server.HasOwnedProcess);
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         if (settings.AutoUpdateManager) { managerUpdateTimer.Start(); _ = CheckManagerUpdateAsync(manual: false); }
         else
@@ -791,6 +813,7 @@ internal sealed class MainForm : ThemedForm
     {
         if (reallyClosing || !settings.AutoRestartServer || watchdogRestarting || busyOperation != BusyOperation.None) return;
         if (server.State != ServerState.Running || !server.HasOwnedProcess) return;
+        if (server.Config is not { SupportsHeartbeat: true }) return;
         var now = DateTime.UtcNow;
         if (now < watchdogPausedUntilUtc) return;
         var heartbeat = server.HeartbeatPath;
@@ -800,8 +823,20 @@ internal sealed class MainForm : ThemedForm
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
         var observation = WatchdogEvaluator.Evaluate(now, server.State, runningSinceUtc, lastWrite);
-        if (observation is not (WatchdogObservation.Stale or WatchdogObservation.Missing)) return;
-        var age = lastWrite is null ? "心跳文件缺失" : $"{Math.Max(0, (int)(now - lastWrite.Value).TotalSeconds)} 秒未更新";
+        if (observation == WatchdogObservation.Healthy) { heartbeatUnavailableLogged = false; return; }
+        if (observation == WatchdogObservation.Missing)
+        {
+            // Older SillyTavern versions (and forks) never write a heartbeat. Missing must not
+            // trigger restarts; process crashes are still handled by the failed-state path.
+            if (!heartbeatUnavailableLogged)
+            {
+                heartbeatUnavailableLogged = true;
+                log.Write("管理器", "未检测到心跳文件，已跳用心跳自动重启（旧版或未启用心跳）。");
+            }
+            return;
+        }
+        if (observation != WatchdogObservation.Stale) return;
+        var age = $"{Math.Max(0, (int)(now - lastWrite!.Value).TotalSeconds)} 秒未更新";
         BeginWatchdogRestart($"检测到服务无响应（{age}）", delay: false);
     }
 
@@ -874,11 +909,11 @@ internal sealed class MainForm : ThemedForm
     private ConfigurationState CurrentConfiguration()
     {
         if (server.Config is not null) return ConfigurationState.Configured;
-        if (configReadFailed) return ConfigurationState.Error;
         var directory = settings.InstallDirectory;
-        if (!string.IsNullOrWhiteSpace(directory) && File.Exists(Path.Combine(directory, "server.js")))
-            return ConfigurationState.Pending;
-        return ConfigurationState.Unconfigured;
+        if (string.IsNullOrWhiteSpace(directory) || !File.Exists(Path.Combine(directory, "server.js")))
+            return ConfigurationState.Unconfigured;
+        if (configReadFailed) return ConfigurationState.Error;
+        return ConfigurationState.Pending;
     }
 
     private void UpdateDisplay()
@@ -1033,16 +1068,42 @@ internal sealed class MainForm : ThemedForm
         if (config is null) { addressItems.Clear(); return; }
         var selected = addressItems.Count > 0 && selectedAddress < addressItems.Count ? addressItems[selectedAddress].Url : null;
         var items = new List<AddressItem> { new("本机", config.LocalUrl) };
-        if (config.Ipv4)
+        var urls = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { config.LocalUrl };
+        if (config.Ipv4 || config.Ipv6)
         {
-            foreach (var nic in NetworkInterface.GetAllNetworkInterfaces().Where(n => n.OperationalStatus == OperationalStatus.Up && n.NetworkInterfaceType != NetworkInterfaceType.Loopback))
+            try
             {
-                foreach (var address in nic.GetIPProperties().UnicastAddresses.Where(a => a.Address.AddressFamily == AddressFamily.InterNetwork))
+                foreach (var nic in NetworkInterface.GetAllNetworkInterfaces().Where(n =>
+                             n.OperationalStatus == OperationalStatus.Up && n.NetworkInterfaceType != NetworkInterfaceType.Loopback))
                 {
-                    if (address.Address.ToString().StartsWith("169.254.", StringComparison.Ordinal)) continue;
-                    items.Add(new AddressItem(nic.Name, $"{(config.Ssl ? "https" : "http")}://{address.Address}:{config.Port}/"));
+                    try
+                    {
+                        var addresses = nic.GetIPProperties().UnicastAddresses;
+                        if (config.Ipv4)
+                        {
+                            foreach (var address in addresses.Where(a => a.Address.AddressFamily == AddressFamily.InterNetwork))
+                            {
+                                if (IPAddress.IsLoopback(address.Address) ||
+                                    address.Address.ToString().StartsWith("169.254.", StringComparison.Ordinal)) continue;
+                                var url = $"{(config.Ssl ? "https" : "http")}://{address.Address}:{config.Port}/";
+                                if (urls.Add(url)) items.Add(new AddressItem(nic.Name, url));
+                            }
+                        }
+                        if (config.Ipv6)
+                        {
+                            foreach (var address in addresses.Where(a => a.Address.AddressFamily == AddressFamily.InterNetworkV6))
+                            {
+                                if (IPAddress.IsLoopback(address.Address) || address.Address.IsIPv6LinkLocal ||
+                                    address.Address.IsIPv6Multicast) continue;
+                                var url = $"{(config.Ssl ? "https" : "http")}://[{address.Address}]:{config.Port}/";
+                                if (urls.Add(url)) items.Add(new AddressItem(nic.Name, url));
+                            }
+                        }
+                    }
+                    catch (Exception ex) when (ex is NetworkInformationException or PlatformNotSupportedException or InvalidOperationException) { }
                 }
             }
+            catch (Exception ex) when (ex is NetworkInformationException or PlatformNotSupportedException or InvalidOperationException) { }
         }
         if (addressItems.Select(x => x.Url).SequenceEqual(items.Select(x => x.Url))) return;
         addressItems.Clear();
@@ -1139,9 +1200,7 @@ internal sealed class MainForm : ThemedForm
         pauseButton.Glyph = Icons.Pause;
         pauseButton.AccessibleName = "暂停滚动";
         toolTip.SetToolTip(pauseButton, "暂停滚动");
-        logView.SelectionStart = logView.TextLength;
-        logView.SelectionLength = 0;
-        logView.ScrollToCaret();
+        RebuildLog();
     }
 
     private void PositionBackToBottom()
@@ -1181,35 +1240,35 @@ internal sealed class MainForm : ThemedForm
 
     private void FlushLogQueue()
     {
+        var render = !hiddenToTray && !pausedScroll;
         var omitted = Interlocked.Exchange(ref omittedLiveLines, 0);
         if (omitted > 0)
         {
             var notice = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [管理器] 实时窗口省略 {omitted} 条日志，完整记录请查看日志文件。";
             logLines.Add(notice);
-            if (Matches(notice)) AppendColored(notice);
+            if (render && Matches(notice)) AppendColored(notice);
         }
-        var oldSelection = logView.SelectionStart;
-        var oldScroll = Point.Empty;
-        if (pausedScroll) SendMessage(logView.Handle, 0x04DD, IntPtr.Zero, ref oldScroll);
         var appended = false;
-        for (var i = 0; i < 400 && queuedLines.TryDequeue(out var line); i++)
+        var budget = render ? Stopwatch.StartNew() : null;
+        var limit = render ? 400 : 4000;
+        var processed = 0;
+        if (render) SuspendLogRedraw();
+        try
         {
-            logLines.Add(line);
-            if (logLines.Count > 10000) logLines.RemoveRange(0, Math.Min(500, logLines.Count - 10000 + 499));
-            if (Matches(line)) { AppendColored(line); appended = true; }
+            while (processed < limit && (budget is null || budget.ElapsedMilliseconds < 40)
+                   && queuedLines.TryDequeue(out var line))
+            {
+                logLines.Add(line);
+                if (logLines.Count > 10000) logLines.RemoveRange(0, Math.Min(500, logLines.Count - 10000 + 499));
+                if (render && Matches(line)) { AppendColored(line); appended = true; }
+                processed++;
+            }
         }
+        finally { if (render) ResumeLogRedraw(); }
         if (!appended) return;
-        if (!pausedScroll)
-        {
-            logView.SelectionStart = logView.TextLength;
-            logView.SelectionLength = 0;
-            logView.ScrollToCaret();
-        }
-        else
-        {
-            logView.SelectionStart = Math.Min(oldSelection, logView.TextLength);
-            SendMessage(logView.Handle, 0x04DE, IntPtr.Zero, ref oldScroll);
-        }
+        logView.SelectionStart = logView.TextLength;
+        logView.SelectionLength = 0;
+        logView.ScrollToCaret();
     }
 
     private void RebuildLog()
@@ -1218,12 +1277,21 @@ internal sealed class MainForm : ThemedForm
         var visible = logLines.Where(Matches).ToArray();
         var truncated = visible.Length > 800;
         if (truncated) visible = visible[^800..];
+        SuspendLogRedraw();
         logView.SuspendLayout();
-        logView.Clear();
-        if (truncated)
-            AppendColored($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [管理器] 仅显示最近 800 条匹配日志，完整记录见日志文件。");
-        foreach (var line in visible) AppendColored(line);
-        logView.ResumeLayout();
+        try
+        {
+            logView.Clear();
+            var batch = visible.ToList();
+            if (truncated)
+                batch.Insert(0, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [管理器] 仅显示最近 800 条匹配日志，完整记录见日志文件。");
+            AppendColoredBatch(batch);
+        }
+        finally
+        {
+            logView.ResumeLayout();
+            ResumeLogRedraw();
+        }
         if (!pausedScroll)
         {
             logView.SelectionStart = logView.TextLength;
@@ -1260,6 +1328,66 @@ internal sealed class MainForm : ThemedForm
         logView.AppendText(message + Environment.NewLine);
     }
 
+    /// <summary>Inserts a whole rebuild batch with one native RTF call instead of per-line appends.</summary>
+    private void AppendColoredBatch(IReadOnlyList<string> lines)
+    {
+        if (lines.Count == 0) return;
+        var p = Theme.Current;
+        var fontSize = Math.Max(1, (int)Math.Round(Typography.Mono.SizeInPoints * 2));
+        var rtf = new StringBuilder();
+        rtf.Append(@"{\rtf1\ansi\deff0{\fonttbl{\f0\fnil\fcharset0 ").Append(Typography.Mono.FontFamily.Name).Append(@";}}");
+        rtf.Append(@"{\colortbl ;");
+        AppendRtfColor(rtf, p.TextTertiary);
+        AppendRtfColor(rtf, p.Accent);
+        AppendRtfColor(rtf, p.Purple);
+        AppendRtfColor(rtf, p.TextSecondary);
+        AppendRtfColor(rtf, p.TextPrimary);
+        rtf.Append(@"}\viewkind4\uc1\pard\f0\fs").Append(fontSize.ToString(CultureInfo.InvariantCulture)).Append(' ');
+        foreach (var line in lines)
+        {
+            if (!TryParseLogLine(line, out var time, out var source, out var message))
+            {
+                rtf.Append(@"\cf5 ");
+                AppendRtfText(rtf, line);
+                rtf.Append(@"\par").Append('\n');
+                continue;
+            }
+            rtf.Append(@"\cf1 ");
+            AppendRtfText(rtf, time + "  ");
+            rtf.Append(@"\cf").Append(source switch { "服务" => '2', "维护" => '3', _ => '4' }).Append(' ');
+            AppendRtfText(rtf, source + "  ");
+            rtf.Append(@"\cf5 ");
+            AppendRtfText(rtf, message);
+            rtf.Append(@"\par").Append('\n');
+        }
+        rtf.Append('}');
+        logView.SelectedRtf = rtf.ToString();
+    }
+
+    private static void AppendRtfColor(StringBuilder builder, Color color) =>
+        builder.Append(@"\red").Append(color.R.ToString(CultureInfo.InvariantCulture))
+            .Append(@"\green").Append(color.G.ToString(CultureInfo.InvariantCulture))
+            .Append(@"\blue").Append(color.B.ToString(CultureInfo.InvariantCulture)).Append(';');
+
+    private static void AppendRtfText(StringBuilder builder, string text)
+    {
+        foreach (var ch in text)
+        {
+            switch (ch)
+            {
+                case '\\': builder.Append(@"\\"); break;
+                case '{': builder.Append(@"\{"); break;
+                case '}': builder.Append(@"\}"); break;
+                case '\r': break;
+                case '\n': builder.Append(@"\par").Append('\n'); break;
+                default:
+                    if (ch < 128) builder.Append(ch);
+                    else builder.Append(@"\u").Append(((short)ch).ToString(CultureInfo.InvariantCulture)).Append('?');
+                    break;
+            }
+        }
+    }
+
     private static bool TryParseLogLine(string line, out string time, out string source, out string message)
     {
         time = source = message = "";
@@ -1284,15 +1412,18 @@ internal sealed class MainForm : ThemedForm
         Location = new Point(Math.Max(area.Left, area.Right - Width - S(12)), Math.Max(area.Top, area.Bottom - Height - S(12)));
     }
 
-    private void HideToTray() { Hide(); WindowState = FormWindowState.Normal; }
+    private void HideToTray() { hiddenToTray = true; Hide(); WindowState = FormWindowState.Normal; }
 
     private void RestoreWindow()
     {
         if (IsDisposed) return;
+        var wasHidden = hiddenToTray;
+        hiddenToTray = false;
         Show();
         WindowState = FormWindowState.Normal;
         Activate();
         PositionToast();
+        if (wasHidden) RebuildLog();
     }
 
     private void TryUi(Action action)
@@ -1377,8 +1508,9 @@ internal sealed class MainForm : ThemedForm
         if (keyData == Keys.Enter)
         {
             var focused = Control.FromHandle(GetFocus());
-            if (focused is ThemedButton or ThemedIconButton or AddressPicker or TextBox or RichTextBox)
-                return base.ProcessCmdKey(ref msg, keyData);
+            // Let any focused control handle Enter itself; only use the form-level
+            // shortcut when the window (not a child control) owns focus.
+            if (focused is not null && focused != this) return base.ProcessCmdKey(ref msg, keyData);
             if (primaryButton.Visible && primaryButton.Enabled)
             {
                 primaryButton.PerformClick();
@@ -1418,9 +1550,22 @@ internal sealed class MainForm : ThemedForm
         UpdateDisplay();
     }
 
+    private void SuspendLogRedraw()
+    {
+        if (logView.IsHandleCreated) SendMessage(logView.Handle, 0x000B, IntPtr.Zero, IntPtr.Zero);
+    }
+
+    private void ResumeLogRedraw()
+    {
+        if (!logView.IsHandleCreated) return;
+        SendMessage(logView.Handle, 0x000B, (IntPtr)1, IntPtr.Zero);
+        logView.Invalidate();
+    }
+
     [DllImport("user32.dll")] private static extern bool DestroyIcon(IntPtr handle);
     [DllImport("user32.dll")] private static extern IntPtr GetFocus();
     [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr handle, int message, IntPtr wParam, ref Point position);
+    [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr handle, int message, IntPtr wParam, IntPtr lParam);
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
@@ -1435,6 +1580,7 @@ internal sealed class MainForm : ThemedForm
             stopSignalThread = true;
             try { showSignal.Set(); } catch (ObjectDisposedException) { }
             logTimer.Stop(); logTimer.Dispose();
+            logSearchTimer.Stop(); logSearchTimer.Dispose();
             watchdogTimer.Stop(); watchdogTimer.Dispose();
             managerUpdateTimer.Stop(); managerUpdateTimer.Dispose();
             managerUpdateLifetime.Cancel(); autoUpdateCheck.Cancel(); managerUpdates?.Dispose();

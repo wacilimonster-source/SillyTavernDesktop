@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using Microsoft.Win32;
 
@@ -11,14 +12,19 @@ internal sealed class AppSettings
     public bool AutoUpdateManager { get; set; } = true;
     public bool AutoRestartServer { get; set; } = true;
 
+    /// <summary>Set when a corrupt settings file was moved aside during the last Load.</summary>
+    public static string? RecoveryNotice { get; private set; }
+
     private static string FindDefaultInstallDirectory()
     {
         var candidates = new[]
         {
-            @"G:\st\SillyTavern-Launcher\SillyTavern",
             Path.Combine(AppContext.BaseDirectory, "SillyTavern"),
             Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "SillyTavern")),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "GitHub", "SillyTavern")
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "GitHub", "SillyTavern"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "SillyTavern"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "SillyTavern"),
+            @"C:\SillyTavern"
         };
         return candidates.FirstOrDefault(path => File.Exists(Path.Combine(path, "server.js"))) ?? "";
     }
@@ -30,13 +36,27 @@ internal sealed class AppSettings
 
     public static AppSettings Load()
     {
+        RecoveryNotice = null;
         try
         {
             return File.Exists(SettingsPath)
                 ? JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath)) ?? new AppSettings()
                 : new AppSettings();
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        catch (JsonException ex)
+        {
+            // A malformed settings file must not prevent the manager from starting.
+            var backup = SettingsPath + ".bad-" + DateTime.Now.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
+            var moved = false;
+            try { File.Move(SettingsPath, backup, overwrite: true); moved = true; }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            RecoveryNotice = moved
+                ? $"设置文件无法解析，已备份为 {backup}，本次使用默认设置。"
+                : $"设置文件无法解析，且无法备份，本次使用默认设置：{ex.Message}";
+            return new AppSettings();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             throw new InvalidOperationException($"无法读取管理器设置：{ex.Message}", ex);
         }

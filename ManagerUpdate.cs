@@ -85,6 +85,12 @@ internal static class PendingManagerUpdateStore
                     !Regex.IsMatch(name, @"^SillyTavernTray-v\d{1,5}\.\d{1,5}\.\d{1,5}\.exe$", RegexOptions.CultureInvariant)) continue;
                 try { File.Delete(path); } catch (IOException) { } catch (UnauthorizedAccessException) { }
             }
+            // Interrupted downloads/atomic writes leave only harmless temp files; no
+            // download can be active while the single manager instance is starting.
+            foreach (var path in Directory.EnumerateFiles(DirectoryPath, "*.tmp", SearchOption.TopDirectoryOnly))
+            {
+                try { File.Delete(path); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            }
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
@@ -101,7 +107,7 @@ internal sealed class ManagerUpdateService : IDisposable
     private readonly string targetPath;
     private readonly Version currentVersion;
     private readonly AppLog log;
-    private readonly SemaphoreSlim gate = new(1, 1);
+    private static readonly SemaphoreSlim Gate = new(1, 1);
     private readonly CancellationTokenSource shutdown = new();
     public event Action<string>? StatusChanged;
 
@@ -127,7 +133,7 @@ internal sealed class ManagerUpdateService : IDisposable
     {
         if (Path.GetFileNameWithoutExtension(targetPath).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
             return "开发模式不自动替换 dotnet，请使用发布的管理器程序。";
-        if (!await gate.WaitAsync(0, cancellation)) return "管理器更新检查正在进行。";
+        if (!await Gate.WaitAsync(0, cancellation)) return "管理器更新检查正在进行。";
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token, cancellation);
         try
         {
@@ -174,7 +180,7 @@ internal sealed class ManagerUpdateService : IDisposable
         }
         catch (OperationCanceledException) when (linked.IsCancellationRequested) { return "管理器更新检查已取消。"; }
         catch (OperationCanceledException) { throw new TimeoutException("读取管理器更新信息超时。"); }
-        finally { gate.Release(); }
+        finally { Gate.Release(); }
     }
 
     internal static ManagerRelease ParseRelease(JsonElement root)
@@ -244,8 +250,8 @@ internal sealed class ManagerUpdateService : IDisposable
     public async Task<bool> PrepareForExitAsync()
     {
         shutdown.Cancel();
-        if (!await gate.WaitAsync(TimeSpan.FromSeconds(5))) return false;
-        gate.Release();
+        if (!await Gate.WaitAsync(TimeSpan.FromSeconds(5))) return false;
+        Gate.Release();
         return true;
     }
 
@@ -253,6 +259,6 @@ internal sealed class ManagerUpdateService : IDisposable
     {
         shutdown.Cancel();
         if (ownsClient) client.Dispose();
-        // The gate may still be released by a canceled asynchronous download.
+        // The static gate may still be released by a canceled asynchronous download.
     }
 }

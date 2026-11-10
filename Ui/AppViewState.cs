@@ -70,7 +70,12 @@ internal static class AppStateFactory
                 PrimaryActionKind.Start, "启动服务", Icons.Play, false, "",
                 [new ViewAction("查看日志", Icons.History, ViewActionKind.ViewLog)], false, false);
 
-        if (server is ServerState.Starting or ServerState.Stopping)
+        if (server == ServerState.Starting)
+            return new AppViewState(StatusTone.Busy, detail, metadata, null,
+                PrimaryActionKind.None, "", "", true, detail,
+                [new ViewAction("停止服务", Icons.Stop, ViewActionKind.Stop, Danger: true)], false, false);
+
+        if (server == ServerState.Stopping)
             return new AppViewState(StatusTone.Busy, detail, metadata, null,
                 PrimaryActionKind.None, "", "", true, detail,
                 Array.Empty<ViewAction>(), false, false);

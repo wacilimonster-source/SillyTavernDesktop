@@ -88,7 +88,13 @@ internal static class ManagerUpdateInstaller
             }
             temporary = null;
             replaced = true;
-            PendingManagerUpdateStore.ClearIfSame(pending);
+            try { PendingManagerUpdateStore.ClearIfSame(pending); }
+            catch (Exception cleanup) when (cleanup is IOException or UnauthorizedAccessException)
+            {
+                // The executable itself was installed successfully; a locked marker must not
+                // trigger the rollback path below.
+                new AppLog().Write("管理器更新", "清理待安装标记失败：" + cleanup.Message);
+            }
             new AppLog().Write("管理器更新", $"管理器 {pending.Version} 已安装。");
             if (restart) StartTarget(target, autostart, skipOnce: false);
             try { if (backup is not null && File.Exists(backup)) File.Delete(backup); }
