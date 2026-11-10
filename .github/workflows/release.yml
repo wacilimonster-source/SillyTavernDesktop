@@ -44,6 +44,7 @@ jobs:
             Where-Object { $_.Matches[0].Groups[1].Value -eq $version }
           if (-not $section) { throw "CHANGELOG.md is missing the $version section." }
           Write-Host "CHANGELOG section for $version found."
+          exit 0
       - name: Run isolated tests
         if: steps.release.outputs.exists != 'true'
         shell: pwsh
