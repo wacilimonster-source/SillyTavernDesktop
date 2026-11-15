@@ -124,6 +124,9 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
           "tag=$tag" >> $env:GITHUB_OUTPUT
           Write-Host "Event=$env:EVENT_NAME Tag=$tag Version=$version"
+          # The release-existence probe leaves $LASTEXITCODE at 1 on purpose; pwsh -Command
+          # would otherwise propagate it as the step's exit code despite a clean run.
+          exit 0
 
       - name: Set project version
         if: steps.preflight.outputs.skip != 'true' && steps.preflight.outputs.needBump == 'true'
