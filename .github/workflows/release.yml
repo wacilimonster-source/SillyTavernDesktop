@@ -4,51 +4,149 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '要发布的版本号（x.y.z），CHANGELOG.md 需已有对应小节'
+        required: true
+        type: string
+      prerelease:
+        description: '标记为预发布（Pre-release）'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
 
+# 同一时间只允许一个发版任务，避免重复创建 Release。
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-      - name: Verify version and check existing release
-        id: release
+
+      - name: Preflight
+        id: preflight
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $version = [string]([xml](Get-Content 'SillyTavernTray.csproj' -Raw)).Project.PropertyGroup.Version
-          Write-Host "Tag=$env:GITHUB_REF_NAME Version=$version"
-          if ($env:GITHUB_REF_NAME -ne "v$version") { throw "Tag does not match project version." }
-          $exists = $false
-          try {
-            gh release view $env:GITHUB_REF_NAME --json tagName 2>$null | Out-Null
-            $exists = ($LASTEXITCODE -eq 0)
-          } catch {
-            $exists = $false
+
+          function Get-ProjectVersion {
+              return [string]([xml](Get-Content -LiteralPath 'SillyTavernTray.csproj' -Raw)).Project.PropertyGroup.Version
           }
-          if ($exists) {
-            "exists=true" >> $env:GITHUB_OUTPUT
-            exit 0
+
+          if ($env:EVENT_NAME -eq 'workflow_dispatch') {
+              if ($env:REF -ne 'refs/heads/main') {
+                  throw "请从 main 分支触发发版（当前：$env:REF）。"
+              }
+
+              # 同步远端标签，便于识别上次失败留下的标签。
+              & git fetch --tags --force --quiet origin
+              if ($LASTEXITCODE -ne 0) { throw '拉取远端标签失败。' }
+
+              $version = $env:INPUT_VERSION.Trim()
+              if ($version -notmatch '^\d+\.\d+\.\d+$') {
+                  throw "版本号必须形如 1.3.0，收到：'$version'。"
+              }
+
+              $tag = "v$version"
+              $projectVersion = Get-ProjectVersion
+
+              $latestTag = @(& git tag --list 'v*' --sort=-v:refname)[0]
+              if ($latestTag -and ([version]$version -lt [version]$latestTag.Substring(1))) {
+                  throw "版本 $version 低于最新标签 $latestTag。"
+              }
+
+              & git rev-parse -q --verify "refs/tags/$tag" *> $null
+              $tagExists = ($LASTEXITCODE -eq 0)
+              if ($tagExists) {
+                  $tagCommit = (& git rev-list -n 1 $tag).Trim()
+                  $headCommit = (& git rev-parse HEAD).Trim()
+                  if ($tagCommit -ne $headCommit) {
+                      throw "标签 $tag 已存在且不指向当前提交；请先删除该标签，或改用对应提交发版。"
+                  }
+                  if ($projectVersion -ne $version) {
+                      throw "标签 $tag 已存在，但 csproj 版本是 $projectVersion；请先对齐版本号。"
+                  }
+              }
+
+              $needBump = ($projectVersion -ne $version)
+              "tagExists=$($tagExists.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+              "needBump=$($needBump.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          } else {
+              $tag = $env:REF_NAME
+              $version = Get-ProjectVersion
+              if ($tag -ne "v$version") {
+                  throw "标签 $tag 与项目版本 v$version 不一致。"
+              }
+              "tagExists=true" >> $env:GITHUB_OUTPUT
+              "needBump=false" >> $env:GITHUB_OUTPUT
           }
-          "exists=false" >> $env:GITHUB_OUTPUT
+
+          & gh release view $tag --json tagName *> $null
+          $releaseExists = ($LASTEXITCODE -eq 0)
+          if ($releaseExists) {
+              if ($env:EVENT_NAME -eq 'workflow_dispatch') {
+                  throw "Release $tag 已存在，无需重复发布。"
+              }
+              "skip=true" >> $env:GITHUB_OUTPUT
+              "version=$version" >> $env:GITHUB_OUTPUT
+              "tag=$tag" >> $env:GITHUB_OUTPUT
+              Write-Host "Release $tag already exists; skipping."
+              exit 0
+          }
+
           $section = Select-String -Path 'CHANGELOG.md' -Pattern '^## \[([0-9]+\.[0-9]+\.[0-9]+)\]' |
-            Where-Object { $_.Matches[0].Groups[1].Value -eq $version }
-          if (-not $section) { throw "CHANGELOG.md is missing the $version section." }
-          Write-Host "CHANGELOG section for $version found."
-          exit 0
+              Where-Object { $_.Matches[0].Groups[1].Value -eq $version }
+          if (-not $section) {
+              throw "CHANGELOG.md 缺少 $version 小节。"
+          }
+
+          "skip=false" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          Write-Host "Event=$env:EVENT_NAME Tag=$tag Version=$version"
+
+      - name: Set project version
+        if: steps.preflight.outputs.skip != 'true' && steps.preflight.outputs.needBump == 'true'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.preflight.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = Join-Path (Get-Location) 'SillyTavernTray.csproj'
+          $text = Get-Content -LiteralPath $path -Raw
+          $pattern = [regex]'<Version>[^<]*</Version>'
+          $updated = $pattern.Replace($text, "<Version>$env:VERSION</Version>", 1)
+          if ($updated -eq $text) {
+              throw 'csproj 中未找到 <Version> 节点。'
+          }
+          [System.IO.File]::WriteAllText($path, $updated, (New-Object System.Text.UTF8Encoding($false)))
+          Write-Host "Project version set to $env:VERSION"
+
       - name: Run isolated tests
-        if: steps.release.outputs.exists != 'true'
+        if: steps.preflight.outputs.skip != 'true'
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           dotnet publish SillyTavernTray.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:Version=1.0.1 -o "$env:RUNNER_TEMP/manager-new"
           if ($LASTEXITCODE -ne 0) { throw 'Update fixture build failed.' }
           dotnet publish SillyTavernTray.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:Version=1.0.0 -o "$env:RUNNER_TEMP/manager-old"
@@ -57,26 +155,74 @@ jobs:
           $env:ST_TRAY_TEST_MANAGER_CURRENT_EXE = "$env:RUNNER_TEMP/manager-old/SillyTavernTray.exe"
           dotnet run --project tests/TraySmokeTests/TraySmokeTests.csproj -c Release
           if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
+
       - name: Build and package
         id: package
-        if: steps.release.outputs.exists != 'true'
+        if: steps.preflight.outputs.skip != 'true'
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           dotnet publish SillyTavernTray.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o release-out
           if ($LASTEXITCODE -ne 0) { throw 'Publish failed.' }
           Copy-Item -LiteralPath release-out/SillyTavernTray.exe -Destination release-out/SillyTavernTray-win-x64.exe
           $hash = (Get-FileHash -LiteralPath release-out/SillyTavernTray-win-x64.exe -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  SillyTavernTray-win-x64.exe" | Set-Content -LiteralPath release-out/SHA256SUMS.txt -Encoding utf8
           "hash=$hash" >> $env:GITHUB_OUTPUT
+
+      - name: Commit version bump
+        id: commit
+        if: steps.preflight.outputs.skip != 'true' && steps.preflight.outputs.needBump == 'true'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.preflight.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add SillyTavernTray.csproj
+          git commit -m "Bump version to $env:VERSION"
+          if ($LASTEXITCODE -ne 0) { throw '提交版本号失败。' }
+          git push origin HEAD:main
+          if ($LASTEXITCODE -ne 0) {
+              throw '推送版本号提交失败：请确认 main 分支允许 GitHub Actions 推送（分支保护或 workflow 权限）。'
+          }
+          Write-Host 'Version bump committed and pushed.'
+
       - name: Publish GitHub Release
-        if: steps.release.outputs.exists != 'true'
+        if: steps.preflight.outputs.skip != 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.preflight.outputs.tag }}
+          VERSION: ${{ steps.preflight.outputs.version }}
+          TAG_EXISTS: ${{ steps.preflight.outputs.tagExists }}
           RELEASE_HASH: ${{ steps.package.outputs.hash }}
+          PRERELEASE: ${{ inputs.prerelease }}
         run: |
-          $version = ([xml](Get-Content 'SillyTavernTray.csproj' -Raw)).Project.PropertyGroup.Version
+          $ErrorActionPreference = 'Stop'
+          $sha = (& git rev-parse HEAD).Trim()
+
+          # 本地标签只用于生成 compare 链接；远程标签由 gh release create 创建。
+          & git rev-parse -q --verify "refs/tags/$env:TAG" *> $null
+          if ($LASTEXITCODE -ne 0) { & git tag $env:TAG $sha }
+
           $notesPath = Join-Path $env:RUNNER_TEMP 'release-notes.md'
-          ./.github/scripts/build-release-notes.ps1 -Tag $env:GITHUB_REF_NAME -Version $version -Hash $env:RELEASE_HASH -ExePath 'release-out/SillyTavernTray-win-x64.exe' -OutputPath $notesPath
-          gh release create $env:GITHUB_REF_NAME release-out/SillyTavernTray-win-x64.exe release-out/SHA256SUMS.txt --verify-tag --notes-file $notesPath --title "SillyTavern 托盘管理器 $env:GITHUB_REF_NAME"
+          ./.github/scripts/build-release-notes.ps1 -Tag $env:TAG -Version $env:VERSION -Hash $env:RELEASE_HASH -ExePath 'release-out/SillyTavernTray-win-x64.exe' -OutputPath $notesPath
+          if (-not (Test-Path -LiteralPath $notesPath)) { throw 'Release notes generation failed.' }
+
+          $ghArgs = @(
+              'release', 'create', $env:TAG,
+              'release-out/SillyTavernTray-win-x64.exe',
+              'release-out/SHA256SUMS.txt',
+              '--title', "SillyTavern 托盘管理器 $env:TAG",
+              '--notes-file', $notesPath
+          )
+          if ($env:TAG_EXISTS -eq 'true') {
+              $ghArgs += '--verify-tag'
+          } else {
+              $ghArgs += @('--target', $sha)
+          }
+          if ($env:PRERELEASE -eq 'true') { $ghArgs += '--prerelease' }
+
+          & gh @ghArgs
           if ($LASTEXITCODE -ne 0) { throw 'Release creation failed.' }

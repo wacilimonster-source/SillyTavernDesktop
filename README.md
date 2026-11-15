@@ -108,7 +108,15 @@ dotnet publish 'SillyTavernTray.csproj' -c Release -r win-x64 --self-contained t
 
 发布文件是自包含的 Windows x64 程序，不要求目标电脑另行安装 .NET；仍需要可用的 Node.js、npm 和 Git。测试使用临时目录、临时 Git 仓库和隔离的注册表键，不操作实际 SillyTavern 安装或真正的登录启动项。
 
-发布新版本时，先在 `CHANGELOG.md` 写入对应版本的小节（发布说明会据此生成），再更新 `SillyTavernTray.csproj` 的 `Version`、提交并推送，最后创建并推送匹配的 `v版本号` 标签。GitHub Actions 会构建并发布 Windows x64 程序，发布说明由 `CHANGELOG.md` 对应小节和 `.github/release-notes-*.md` 自动生成。自动更新只读取正式 Release，要求资产名为 `SillyTavernTray-win-x64.exe`，并校验 GitHub 提供的资产 SHA-256。
+发布新版本推荐直接在 GitHub 上完成：
+
+1. 在 `CHANGELOG.md` 写入对应版本的小节并合并到 `main`（发布说明会据此生成）。
+2. 打开 Actions → **Release manager** → **Run workflow**，填入版本号（例如 `1.3.0`），需要时勾选预发布。
+3. 工作流会校验版本号与 CHANGELOG，更新 `SillyTavernTray.csproj` 的 `Version`，以 `github-actions[bot]` 提交并推送，然后运行测试、构建 Windows x64 单文件、打 `v版本号` 标签并创建 Release。本地不需要构建或打标签。
+
+仍然支持传统方式：先更新 `SillyTavernTray.csproj` 的 `Version` 并推送，再推送匹配的 `v版本号` 标签；工作流会校验标签与版本一致后发布。
+
+发布说明由 `CHANGELOG.md` 对应小节和 `.github/release-notes-*.md` 自动生成。自动更新只读取正式 Release，要求资产名为 `SillyTavernTray-win-x64.exe`，并校验 GitHub 提供的资产 SHA-256。
 
 ## English
 
