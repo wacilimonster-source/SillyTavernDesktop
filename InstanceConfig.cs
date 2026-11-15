@@ -71,11 +71,26 @@ internal sealed record InstanceConfig(int Port, bool Ssl, bool Ipv4, bool Ipv6, 
             """;
         var result = await CommandRunner.RunAsync(node, ["-e", script], directory, timeout: TimeSpan.FromSeconds(30));
         if (result.ExitCode != 0) throw new InvalidOperationException("无法读取 SillyTavern 配置，请检查 Node.js 和项目依赖。\n" + result.Error.Trim());
-        using var json = JsonDocument.Parse(result.Output);
-        var root = json.RootElement;
-        var port = root.GetProperty("port").GetInt32();
+        int port; bool ssl, ipv4, ipv6, whitelist, basicAuth, userAccounts; string data;
+        try
+        {
+            using var json = JsonDocument.Parse(result.Output);
+            var root = json.RootElement;
+            port = root.GetProperty("port").GetInt32();
+            ssl = root.GetProperty("ssl").GetBoolean();
+            ipv4 = root.GetProperty("ipv4").GetBoolean();
+            ipv6 = root.GetProperty("ipv6").GetBoolean();
+            whitelist = root.GetProperty("whitelist").GetBoolean();
+            basicAuth = root.GetProperty("basicAuth").GetBoolean();
+            userAccounts = root.GetProperty("userAccounts").GetBoolean();
+            data = root.GetProperty("dataRoot").GetString() ?? "data";
+        }
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException or FormatException or InvalidCastException)
+        {
+            // Stray stdout (NODE_OPTIONS banners, console codepage noise) must not surface raw JSON errors.
+            throw new InvalidOperationException("无法读取 SillyTavern 配置，请检查 config.yaml 与 Node.js 环境。");
+        }
         if (port is < 1 or > 65535) throw new InvalidOperationException("SillyTavern 配置的端口无效。");
-        var data = root.GetProperty("dataRoot").GetString() ?? "data";
         var version = "未知";
         var packagePath = Path.Combine(directory, "package.json");
         if (File.Exists(packagePath))
@@ -83,9 +98,7 @@ internal sealed record InstanceConfig(int Port, bool Ssl, bool Ipv4, bool Ipv6, 
             using var package = JsonDocument.Parse(await File.ReadAllTextAsync(packagePath));
             if (package.RootElement.TryGetProperty("version", out var v)) version = v.GetString() ?? "未知";
         }
-        return new InstanceConfig(port, root.GetProperty("ssl").GetBoolean(), root.GetProperty("ipv4").GetBoolean(),
-            root.GetProperty("ipv6").GetBoolean(), root.GetProperty("whitelist").GetBoolean(),
-            root.GetProperty("basicAuth").GetBoolean(), root.GetProperty("userAccounts").GetBoolean(),
+        return new InstanceConfig(port, ssl, ipv4, ipv6, whitelist, basicAuth, userAccounts,
             Path.GetFullPath(data, directory), version);
     }
 }

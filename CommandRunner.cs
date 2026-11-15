@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 
@@ -7,14 +8,26 @@ internal sealed record CommandResult(int ExitCode, string Output, string Error);
 
 internal static class CommandRunner
 {
+    private static readonly ConcurrentDictionary<string, string> ExecutableCache = new(StringComparer.OrdinalIgnoreCase);
+    private static string? cachedPathEnvironment;
+
     public static string? FindExecutable(string name)
     {
+        // A scan touches every PATH directory; node.exe is looked up twice per server start.
+        // The cache is dropped as soon as PATH changes so tests and runtime tweaks still resolve.
+        var pathEnvironment = Environment.GetEnvironmentVariable("PATH") ?? "";
+        if (cachedPathEnvironment != pathEnvironment)
+        {
+            ExecutableCache.Clear();
+            cachedPathEnvironment = pathEnvironment;
+        }
+        if (ExecutableCache.TryGetValue(name, out var cached)) return cached;
         foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries))
         {
             try
             {
                 var candidate = Path.Combine(directory.Trim().Trim('"'), name);
-                if (File.Exists(candidate)) return candidate;
+                if (File.Exists(candidate)) return ExecutableCache.GetOrAdd(name, candidate);
             }
             catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { }
         }
@@ -44,11 +57,16 @@ internal static class CommandRunner
         var error = new StringBuilder();
         async Task Pump(StreamReader reader, StringBuilder builder)
         {
-            while (await reader.ReadLineAsync() is { } line)
+            try
             {
-                if (builder.Length < 1024 * 1024) builder.AppendLine(line);
-                onOutput?.Invoke(line);
+                while (await reader.ReadLineAsync() is { } line)
+                {
+                    if (builder.Length < 1024 * 1024) builder.AppendLine(line);
+                    onOutput?.Invoke(line);
+                }
             }
+            // A pipe broken by the timeout kill must not turn a finished command into an exception.
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException) { }
         }
         var outTask = Pump(process.StandardOutput, output);
         var errorTask = Pump(process.StandardError, error);

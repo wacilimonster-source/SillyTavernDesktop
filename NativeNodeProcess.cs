@@ -10,22 +10,29 @@ namespace SillyTavernTray;
 internal sealed class NativeNodeProcess : IDisposable
 {
     private const uint CreateNewConsole = 0x00000010;
+    private const uint CreateSuspended = 0x00000004;
     private const uint StartfUseShowWindow = 0x00000001;
     private const uint StartfUseStdHandles = 0x00000100;
     private const uint HandleFlagInherit = 1;
+    private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+    private const int JobObjectExtendedLimitInfoClass = 9;
     private readonly Process process;
     private readonly SafeFileHandle inputWrite;
     private readonly StreamReader stdout;
     private readonly StreamReader stderr;
     private readonly Action<string> line;
+    // Closing this handle is the crash safety net: if the manager dies without stopping the
+    // server, the operating system closes the last job handle and the whole tree is killed.
+    private readonly SafeJobHandle jobHandle;
     private readonly TaskCompletionSource monitoredExit = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     private NativeNodeProcess(Process process, SafeFileHandle inputWrite, SafeFileHandle outputRead,
-        SafeFileHandle errorRead, Action<string> line)
+        SafeFileHandle errorRead, Action<string> line, SafeJobHandle jobHandle)
     {
         this.process = process;
         this.inputWrite = inputWrite;
         this.line = line;
+        this.jobHandle = jobHandle;
         stdout = new StreamReader(new FileStream(outputRead, FileAccess.Read), new UTF8Encoding(false, false), true);
         stderr = new StreamReader(new FileStream(errorRead, FileAccess.Read), new UTF8Encoding(false, false), true);
     }
@@ -37,8 +44,15 @@ internal sealed class NativeNodeProcess : IDisposable
     {
         var security = new SecurityAttributes { Length = Marshal.SizeOf<SecurityAttributes>(), InheritHandle = true };
         SafeFileHandle? outRead = null, outWrite = null, errRead = null, errWrite = null, inRead = null, inWrite = null;
+        var job = CreateJobObject(IntPtr.Zero, null);
+        if (job.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
         try
         {
+            // KILL_ON_JOB_CLOSE keeps the server from outliving the manager after a crash or kill.
+            var limits = new JobObjectExtendedLimitInformation();
+            limits.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
+            if (!SetInformationJobObject(job, JobObjectExtendedLimitInfoClass, ref limits, (uint)Marshal.SizeOf<JobObjectExtendedLimitInformation>()))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
             if (!CreatePipe(out outRead, out outWrite, ref security, 0) ||
                 !CreatePipe(out errRead, out errWrite, ref security, 0) ||
                 !CreatePipe(out inRead, out inWrite, ref security, 0))
@@ -55,20 +69,35 @@ internal sealed class NativeNodeProcess : IDisposable
                 StdOutput = outWrite.DangerousGetHandle(), StdError = errWrite.DangerousGetHandle()
             };
             var command = new StringBuilder(string.Join(" ", new[] { nodePath }.Concat(args).Select(QuoteArgument)));
-            if (!CreateProcess(nodePath, command, IntPtr.Zero, IntPtr.Zero, true, CreateNewConsole,
+            // Start suspended so the server joins the job before it can spawn anything of its own;
+            // npm-installed child processes then stay inside the job automatically.
+            if (!CreateProcess(nodePath, command, IntPtr.Zero, IntPtr.Zero, true, CreateNewConsole | CreateSuspended,
                     IntPtr.Zero, workingDirectory, ref startup, out var info))
                 throw new Win32Exception(Marshal.GetLastWin32Error());
+            var resumed = false;
             try
             {
+                if (!AssignProcessToJobObject(job, info.Process))
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                if (ResumeThread(info.Thread) == uint.MaxValue)
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                resumed = true;
                 var child = Process.GetProcessById((int)info.ProcessId);
-                var result = new NativeNodeProcess(child, inWrite, outRead, errRead, line);
+                var result = new NativeNodeProcess(child, inWrite, outRead, errRead, line, job);
                 inWrite = outRead = errRead = null;
+                job = null!; // Ownership moves to the wrapper; its Dispose closes the job.
                 return result;
+            }
+            catch
+            {
+                if (!resumed) TerminateProcess(info.Process, 1); // Never leak a suspended node process.
+                throw;
             }
             finally { CloseHandle(info.Process); CloseHandle(info.Thread); }
         }
         finally
         {
+            job?.Dispose();
             outRead?.Dispose(); outWrite?.Dispose(); errRead?.Dispose(); errWrite?.Dispose(); inRead?.Dispose(); inWrite?.Dispose();
         }
     }
@@ -103,8 +132,17 @@ internal sealed class NativeNodeProcess : IDisposable
         info.ArgumentList.Add("--signal-console");
         info.ArgumentList.Add(Id.ToString());
         using var helper = Process.Start(info) ?? throw new InvalidOperationException("无法启动停止服务所需的辅助进程。");
-        await helper.WaitForExitAsync();
-        return helper.ExitCode == 0;
+        try
+        {
+            // A hung helper (antivirus interference, dying console) must not wedge StopAsync forever.
+            await helper.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            return helper.ExitCode == 0;
+        }
+        catch (TimeoutException)
+        {
+            try { helper.Kill(); } catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+            return false;
+        }
     }
 
     public async Task<bool> WaitForExitAsync(TimeSpan timeout)
@@ -118,6 +156,13 @@ internal sealed class NativeNodeProcess : IDisposable
         catch (TimeoutException) { return HasExited; }
     }
 
+    /// <summary>Synchronous variant for shutdown paths that cannot await.</summary>
+    public bool WaitForExitSync(TimeSpan timeout)
+    {
+        try { return process.WaitForExit((int)timeout.TotalMilliseconds); }
+        catch (InvalidOperationException) { return HasExited; }
+    }
+
     public void Kill()
     {
         if (!HasExited) process.Kill(entireProcessTree: true);
@@ -129,6 +174,8 @@ internal sealed class NativeNodeProcess : IDisposable
         stdout.Dispose();
         stderr.Dispose();
         process.Dispose();
+        // Closing the last job handle kills the tree if it is somehow still alive (KILL_ON_JOB_CLOSE).
+        jobHandle.Dispose();
     }
 
     private static string QuoteArgument(string value)
@@ -161,10 +208,39 @@ internal sealed class NativeNodeProcess : IDisposable
     {
         public IntPtr Process, Thread; public uint ProcessId, ThreadId;
     }
+    [StructLayout(LayoutKind.Sequential)] private struct JobObjectBasicLimitInformation
+    {
+        public long PerProcessUserTimeLimit, PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass, SchedulingClass;
+    }
+    [StructLayout(LayoutKind.Sequential)] private struct IoCounters
+    {
+        public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount, ReadTransferCount, WriteTransferCount, OtherTransferCount;
+    }
+    [StructLayout(LayoutKind.Sequential)] private struct JobObjectExtendedLimitInformation
+    {
+        public JobObjectBasicLimitInformation BasicLimitInformation;
+        public IoCounters IoInfo;
+        public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+    }
+    private sealed class SafeJobHandle : SafeHandleMinusOneIsInvalid
+    {
+        public SafeJobHandle() : base(true) { }
+        protected override bool ReleaseHandle() => CloseHandle(handle);
+    }
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool CreatePipe(out SafeFileHandle read, out SafeFileHandle write, ref SecurityAttributes attributes, uint size);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetHandleInformation(SafeFileHandle handle, uint mask, uint flags);
     [DllImport("kernel32.dll", EntryPoint = "CreateProcessW", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool CreateProcess(string application, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes,
         [MarshalAs(UnmanagedType.Bool)] bool inheritHandles, uint flags, IntPtr environment, string currentDirectory, ref StartupInfo startup, out ProcessInformation information);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern SafeJobHandle CreateJobObject(IntPtr attributes, string? name);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetInformationJobObject(SafeJobHandle job, int informationClass, ref JobObjectExtendedLimitInformation limits, uint size);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool AssignProcessToJobObject(SafeJobHandle job, IntPtr process);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern uint ResumeThread(IntPtr thread);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool TerminateProcess(IntPtr process, uint exitCode);
 }

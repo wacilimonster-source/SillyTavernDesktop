@@ -20,6 +20,8 @@ internal sealed class ServerController
     private string detail = "未运行";
     public InstanceConfig? Config { get; private set; }
     public event Action? Changed;
+    /// <summary>State-independent observations (slow startup) that deserve a tray balloon.</summary>
+    public event Action<string>? Notice;
 
     public ServerController(AppSettings settings, AppLog log) { this.settings = settings; this.log = log; }
     public ServerState State { get { lock (sync) return state; } }
@@ -42,7 +44,13 @@ internal sealed class ServerController
             if (!Directory.Exists(directory) || !File.Exists(Path.Combine(directory, "server.js")))
                 throw new InvalidOperationException("未找到 SillyTavern 目录或 server.js，请在设置中选择已有目录。");
             var node = CommandRunner.FindExecutable("node.exe") ?? throw new InvalidOperationException("未找到 Node.js，请检查 PATH。");
+            var stamps = ReadConfigStamps(directory);
+            // Reading the config costs a whole node -e spawn (0.3-2 s cold). Config files are
+            // the only inputs that change between refreshes, so identical stamps reuse the
+            // previous result. (Environment overrides are fixed for the manager's lifetime.)
+            if (Config is not null && stamps == cachedStamps) return;
             Config = await InstanceConfig.LoadAsync(directory, node);
+            cachedStamps = stamps;
             Changed?.Invoke();
         }
         catch
@@ -51,11 +59,26 @@ internal sealed class ServerController
             if (!HasOwnedProcess && Config is not null)
             {
                 Config = null;
+                cachedStamps = null;
                 Changed?.Invoke();
             }
             throw;
         }
         finally { configGate.Release(); }
+    }
+
+    private (DateTime Config, DateTime Default, DateTime Package)? cachedStamps;
+
+    private static (DateTime Config, DateTime Default, DateTime Package)? ReadConfigStamps(string directory)
+    {
+        DateTime Stamp(string path)
+        {
+            try { return File.GetLastWriteTimeUtc(path); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return DateTime.MinValue; }
+        }
+        return (Stamp(Path.Combine(directory, "config.yaml")),
+            Stamp(Path.Combine(directory, "default", "config.yaml")),
+            Stamp(Path.Combine(directory, "package.json")));
     }
 
     public static bool PortIsOccupied(int port)
@@ -108,14 +131,22 @@ internal sealed class ServerController
     }
 
     /// <summary>
+    /// One loopback probe client for the whole process lifetime. The permissive certificate
+    /// callback is acceptable because this client only ever talks to the configured local endpoint.
+    /// </summary>
+    private static readonly HttpClient ReadinessClient = new(new HttpClientHandler
+    {
+        UseProxy = false,
+        ServerCertificateCustomValidationCallback = (_, _, _, _) => true
+    })
+    { Timeout = TimeSpan.FromSeconds(2) };
+
+    /// <summary>
     /// Probes the loopback URL until it answers. This deliberately does not depend on the
     /// server's startup log text, and keeps polling for slow starts instead of giving up.
     /// </summary>
     private async Task ObserveReadinessAsync(NativeNodeProcess process, InstanceConfig config)
     {
-        using var handler = new HttpClientHandler { UseProxy = false };
-        if (config.Ssl) handler.ServerCertificateCustomValidationCallback = (_, _, _, _) => true; // Only the loopback readiness probe.
-        using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(2) };
         var started = DateTime.UtcNow;
         var slowNoted = false;
         while (!process.HasExited)
@@ -123,19 +154,25 @@ internal sealed class ServerController
             if (!ReferenceEquals(child, process) || State != ServerState.Starting) return;
             try
             {
-                using var response = await client.GetAsync(new Uri(config.LocalUrl));
+                using var response = await ReadinessClient.GetAsync(new Uri(config.LocalUrl));
                 if (!ReferenceEquals(child, process) || State != ServerState.Starting) return;
+                // Any reply does not mean usable: a broken install answering 5xx on our port
+                // must keep probing instead of claiming 运行中.
                 var restricted = response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden;
-                SetState(ServerState.Running, restricted ? $"运行中，本机访问受限（{(int)response.StatusCode}）" : "运行中");
-                return;
+                if (response.IsSuccessStatusCode || restricted)
+                {
+                    SetState(ServerState.Running, restricted ? $"运行中，本机访问受限（{(int)response.StatusCode}）" : "运行中");
+                    return;
+                }
             }
             catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException) { }
             if (!slowNoted && DateTime.UtcNow - started > TimeSpan.FromSeconds(90))
             {
                 slowNoted = true;
                 SetState(ServerState.Starting, "服务启动较慢，请查看日志");
+                Notice?.Invoke("服务启动较慢，请查看日志");
             }
-            await Task.Delay(DateTime.UtcNow - started < TimeSpan.FromSeconds(10) ? 150 : 1000);
+            await Task.Delay(DateTime.UtcNow - started < TimeSpan.FromSeconds(10) ? 300 : 1000);
         }
     }
 
@@ -153,6 +190,31 @@ internal sealed class ServerController
         SetState(wasExpected ? ServerState.Stopped : ServerState.Failed, wasExpected ? "未运行" : $"服务异常退出（退出码 {code}）");
         // Allow the asynchronous pipe readers to drain their final output before disposal.
         _ = Task.Run(async () => { await Task.Delay(500); exited.Dispose(); });
+    }
+
+    /// <summary>
+    /// Best-effort synchronous stop for shutdown paths (Windows shutdown/logoff, task-manager
+    /// close) that cannot await the async lifecycle. Never throws.
+    /// </summary>
+    public void EmergencyStopSync()
+    {
+        NativeNodeProcess? process;
+        lock (sync) { process = child; if (process is not null) expectedExit = true; }
+        if (process is null || process.HasExited) return;
+        log.Write("管理器", "系统正在关机或注销，尽力停止服务。");
+        try
+        {
+            // The interrupt helper completes on thread-pool continuations only, so blocking on
+            // it here cannot deadlock. Everything is bounded: shutdown grants just seconds.
+            if (!process.SendInterruptAsync().GetAwaiter().GetResult())
+                log.Write("管理器", "无法发送正常停止信号。");
+        }
+        catch (Exception ex) { log.Write("管理器", "无法发送正常停止信号：" + ex.Message); }
+        try
+        {
+            if (!process.WaitForExitSync(TimeSpan.FromSeconds(4))) process.Kill();
+        }
+        catch (Exception ex) { log.Write("管理器", "关机时停止服务失败：" + ex.Message); }
     }
 
     public async Task<bool> StopAsync(Func<Task<StopDecision>> askOnTimeout)

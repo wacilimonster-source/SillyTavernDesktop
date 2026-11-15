@@ -39,6 +39,7 @@ internal static class Program
         PendingManagerUpdateStore.CleanupStaleFiles();
 
         ApplicationConfiguration.Initialize();
+        CrashReporter.Install();
         try
         {
             using var showSignal = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
@@ -57,6 +58,49 @@ internal static class Program
             MessageBox.Show(ex.Message, "SillyTavern 管理器", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 1;
         }
+    }
+}
+
+/// <summary>Unlogged crashes made every other diagnosis impossible; this keeps a trace on disk.</summary>
+internal static class CrashReporter
+{
+    private static int fatalReported;
+
+    public static void Install()
+    {
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) => Report("UI 线程", e.Exception, fatal: false);
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            Report("后台线程", e.ExceptionObject as Exception ?? new Exception(e.ExceptionObject?.ToString()), fatal: e.IsTerminating);
+        TaskScheduler.UnobservedTaskException += (_, e) => Report("未观察任务", e.Exception, fatal: false);
+    }
+
+    private static void Report(string origin, Exception exception, bool fatal)
+    {
+        var stamp = DateTime.Now;
+        var text = $"[{stamp:yyyy-MM-dd HH:mm:ss}] [{origin}]{(fatal ? "（致命，进程即将退出）" : "")}\n{exception}";
+        try { new AppLog().Write("崩溃", text.ReplaceLineEndings(" | ")); } catch { }
+        try
+        {
+            Directory.CreateDirectory(AppSettings.DataDirectory);
+            File.WriteAllText(Path.Combine(AppSettings.DataDirectory, "crash-" + stamp.ToString("yyyyMMdd-HHmmssff") + ".txt"), text);
+            PruneOldReports();
+        }
+        catch { }
+        if (fatal && Interlocked.Exchange(ref fatalReported, 1) == 0)
+            MessageBox.Show("发生未处理的异常，SillyTavern 管理器即将退出。\n详情见数据目录中的崩溃报告。\n\n" + exception.Message,
+                "SillyTavern 管理器", MessageBoxButtons.OK, MessageBoxIcon.Error);
+    }
+
+    private static void PruneOldReports()
+    {
+        try
+        {
+            foreach (var path in Directory.EnumerateFiles(AppSettings.DataDirectory, "crash-*.txt")
+                         .OrderByDescending(File.GetLastWriteTime).Skip(10))
+                File.Delete(path);
+        }
+        catch (IOException) { } catch (UnauthorizedAccessException) { }
     }
 }
 

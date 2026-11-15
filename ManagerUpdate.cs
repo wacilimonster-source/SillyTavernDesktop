@@ -29,6 +29,8 @@ internal static class PendingManagerUpdateStore
 {
     public static string DirectoryPath => Path.Combine(AppSettings.DataDirectory, "manager-updates");
     private static string PendingPath => Path.Combine(DirectoryPath, "pending.json");
+    /// <summary>Lets UI layers cache the pending record instead of re-reading the file on every repaint.</summary>
+    public static event Action? Changed;
 
     public static PendingManagerUpdate? Read()
     {
@@ -55,6 +57,7 @@ internal static class PendingManagerUpdateStore
         {
             File.WriteAllText(temporary, JsonSerializer.Serialize(pending, new JsonSerializerOptions { WriteIndented = true }));
             File.Move(temporary, PendingPath, overwrite: true);
+            Changed?.Invoke();
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
@@ -63,7 +66,10 @@ internal static class PendingManagerUpdateStore
     {
         var current = Read();
         if (current is not null && current.FileName == pending.FileName && current.Sha256.Equals(pending.Sha256, StringComparison.OrdinalIgnoreCase))
+        {
             File.Delete(PendingPath);
+            Changed?.Invoke();
+        }
     }
 
     public static string HashFile(string path)
@@ -161,11 +167,14 @@ internal sealed class ManagerUpdateService : IDisposable
                 currentPending.TargetPath.Equals(targetPath, StringComparison.OrdinalIgnoreCase) &&
                 currentPending.Sha256.Equals(release.Sha256, StringComparison.OrdinalIgnoreCase) &&
                 File.Exists(PendingManagerUpdateStore.StagePath(currentPending)) &&
-                PendingManagerUpdateStore.HashFile(PendingManagerUpdateStore.StagePath(currentPending)).Equals(release.Sha256, StringComparison.OrdinalIgnoreCase))
+                (await Task.Run(() => PendingManagerUpdateStore.HashFile(PendingManagerUpdateStore.StagePath(currentPending)), linked.Token))
+                    .Equals(release.Sha256, StringComparison.OrdinalIgnoreCase))
             {
                 if (manual && currentPending.Failed)
                 {
-                    if (!PendingManagerUpdateStore.HashFile(targetPath).Equals(currentPending.TargetSha256, StringComparison.OrdinalIgnoreCase))
+                    // Hashing a ~100 MB executable belongs off the UI thread; these run on the 6 h timer.
+                    var targetHash = await Task.Run(() => PendingManagerUpdateStore.HashFile(targetPath), linked.Token);
+                    if (!targetHash.Equals(currentPending.TargetSha256, StringComparison.OrdinalIgnoreCase))
                         return "管理器程序已发生变化，请手动检查后从 GitHub Release 安装。";
                     PendingManagerUpdateStore.Write(currentPending with { Failed = false, Error = null });
                 }
@@ -242,7 +251,8 @@ internal sealed class ManagerUpdateService : IDisposable
             var fileName = "SillyTavernTray-" + release.Tag + ".exe";
             var destination = Path.Combine(PendingManagerUpdateStore.DirectoryPath, fileName);
             File.Move(temporary, destination, overwrite: true);
-            PendingManagerUpdateStore.Write(new PendingManagerUpdate(release.Tag, fileName, release.Sha256, targetPath, PendingManagerUpdateStore.HashFile(targetPath)));
+            var targetHash = await Task.Run(() => PendingManagerUpdateStore.HashFile(targetPath), cancellation);
+            PendingManagerUpdateStore.Write(new PendingManagerUpdate(release.Tag, fileName, release.Sha256, targetPath, targetHash));
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }

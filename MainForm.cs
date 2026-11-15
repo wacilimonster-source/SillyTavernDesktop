@@ -98,7 +98,8 @@ internal sealed class MainForm : ThemedForm
     private Icon? activeTrayIcon;
     private Color lastTrayColor = Color.Empty;
     private BusyOperation busyOperation;
-    private bool reallyClosing, stopSignalThread, pausedScroll, bannerDismissed, configReadFailed;
+    private bool reallyClosing, pausedScroll, bannerDismissed, configReadFailed;
+    private volatile bool stopSignalThread;
     private bool hiddenToTray, heartbeatUnavailableLogged;
     private readonly RestartLimiter watchdogLimiter = new();
     private DateTime? runningSinceUtc;
@@ -107,6 +108,13 @@ internal sealed class MainForm : ThemedForm
     private bool watchdogRestarting;
     private string branch = "未知";
     private PrimaryActionKind primaryKind;
+    // Cached display inputs: UpdateDisplay runs on every state change and must not touch the disk.
+    private PendingManagerUpdate? pendingUpdateCache;
+    private bool pendingUpdateCacheValid;
+    private InstanceConfig? lastAddressConfig;
+    private DateTime lastAddressRefreshUtc = DateTime.MinValue;
+    private IReadOnlyList<ViewAction>? lastActionSet;
+    private StatusTone? lastActionTone;
 
     static MainForm() { Theme.Initialize(); }
 
@@ -227,9 +235,11 @@ internal sealed class MainForm : ThemedForm
         tray.DoubleClick += (_, _) => RestoreWindow();
         SetTrayIcon(Color.FromArgb(140, 146, 154), force: true);
 
-        logLines.AddRange(log.ReadRecent());
+        logLines.AddRange(log.ReadRecent(2000));
         log.LineWritten += OnLogLine;
         server.Changed += OnServerChanged;
+        server.Notice += message => TryUi(() => Notify("SillyTavern 启动缓慢", message));
+        PendingManagerUpdateStore.Changed += OnPendingUpdateStoreChanged;
         logTimer.Tick += (_, _) => FlushLogQueue();
         logTimer.Start();
         watchdogTimer.Tick += (_, _) => CheckWatchdog();
@@ -254,11 +264,16 @@ internal sealed class MainForm : ThemedForm
         Resize += (_, _) => { PositionToast(); if (WindowState == FormWindowState.Minimized) HideToTray(); };
         _ = Task.Run(() =>
         {
+            // Polling with a timeout keeps this thread from sitting in an unbreakable wait that
+            // races Dispose; an escaping ObjectDisposedException here would kill the whole process.
             while (!stopSignalThread)
             {
-                showSignal.WaitOne();
-                if (stopSignalThread) break;
-                TryUi(RestoreWindow);
+                try
+                {
+                    if (!showSignal.WaitOne(250) || stopSignalThread) continue;
+                    TryUi(RestoreWindow);
+                }
+                catch (ObjectDisposedException) { break; }
             }
         });
     }
@@ -558,9 +573,26 @@ internal sealed class MainForm : ThemedForm
         trayMenu.Items.Add(item);
     }
 
+    private PendingManagerUpdate? ReadPendingUpdate()
+    {
+        if (!pendingUpdateCacheValid)
+        {
+            pendingUpdateCache = PendingManagerUpdateStore.Read();
+            pendingUpdateCacheValid = true;
+        }
+        return pendingUpdateCache;
+    }
+
+    private void OnPendingUpdateStoreChanged()
+    {
+        // The store changed on a background task (download completion); refresh the cached record.
+        pendingUpdateCacheValid = false;
+        TryUi(UpdateDisplay);
+    }
+
     private async Task InitializeAsync()
     {
-        var pending = PendingManagerUpdateStore.Read();
+        var pending = ReadPendingUpdate();
         if (pending is { Failed: true })
         {
             log.Write("管理器更新", "上次自动安装失败，可从托盘手动检查管理器更新后重试。");
@@ -574,9 +606,11 @@ internal sealed class MainForm : ThemedForm
         }
         await RunExclusiveAsync(BusyOperation.ReadingConfig, async () =>
         {
+            // The branch lookup is an independent git spawn; overlap it with the start path.
+            var branchTask = maintenance.GetBranchAsync();
             if (settings.StartServerOnLaunch) await server.StartAsync(autoStarted);
             else await server.RefreshConfigAsync();
-            branch = await maintenance.GetBranchAsync();
+            branch = await branchTask;
         }, showErrors: !autoStarted);
         UpdateDisplay();
     }
@@ -615,7 +649,12 @@ internal sealed class MainForm : ThemedForm
         async () =>
         {
             if (server.HasOwnedProcess) await server.StopAsync(AskStopDecisionAsync);
-            else { await server.StartAsync(); branch = await maintenance.GetBranchAsync(); }
+            else
+            {
+                var branchTask = maintenance.GetBranchAsync();
+                await server.StartAsync();
+                branch = await branchTask;
+            }
         });
 
     private async Task RestartAsync()
@@ -628,8 +667,9 @@ internal sealed class MainForm : ThemedForm
         }
         await RunExclusiveAsync(BusyOperation.Starting, async () =>
         {
+            var branchTask = maintenance.GetBranchAsync();
             await server.StartAsync();
-            branch = await maintenance.GetBranchAsync();
+            branch = await branchTask;
         });
     }
 
@@ -641,8 +681,9 @@ internal sealed class MainForm : ThemedForm
 
     private async Task RefreshEnvironmentAsync() => await RunExclusiveAsync(BusyOperation.ReadingConfig, async () =>
     {
+        var branchTask = maintenance.GetBranchAsync();
         await server.RefreshConfigAsync();
-        branch = await maintenance.GetBranchAsync();
+        branch = await branchTask;
     });
 
     private async Task RunPrimaryAsync()
@@ -778,8 +819,9 @@ internal sealed class MainForm : ThemedForm
         else
         {
             managerUpdateTimer.Stop();
+            // Cancel only: disposing a source that an in-flight check still references turns
+            // into ObjectDisposedException noise logged as a bogus "检查失败".
             autoUpdateCheck.Cancel();
-            autoUpdateCheck.Dispose();
             autoUpdateCheck = new CancellationTokenSource();
         }
         _ = RefreshEnvironmentAsync();
@@ -802,7 +844,7 @@ internal sealed class MainForm : ThemedForm
         if (current == ServerState.Failed)
         {
             if (watchdogRestarting) { /* the auto-restart flow reports its own outcome */ }
-            else if (previous == ServerState.Running && settings.AutoRestartServer && !reallyClosing && busyOperation == BusyOperation.None)
+            else if (previous is ServerState.Running or ServerState.Starting && settings.AutoRestartServer && !reallyClosing && busyOperation == BusyOperation.None)
                 BeginWatchdogRestart("检测到服务异常退出", delay: true);
             else Notify("SillyTavern 已退出", detail);
         }
@@ -880,8 +922,9 @@ internal sealed class MainForm : ThemedForm
             }
             await RunExclusiveAsync(BusyOperation.Starting, async () =>
             {
+                var branchTask = maintenance.GetBranchAsync();
                 await server.StartAsync();
-                branch = await maintenance.GetBranchAsync();
+                branch = await branchTask;
             }, showErrors: false);
             if (server.State is ServerState.Running or ServerState.Starting)
             {
@@ -984,7 +1027,7 @@ internal sealed class MainForm : ThemedForm
             layout.PerformLayout();
         }
 
-        var pending = PendingManagerUpdateStore.Read();
+        var pending = ReadPendingUpdate();
         var showBanner = pending is { Failed: false } && !bannerDismissed && busyOperation == BusyOperation.None;
         if (bannerRow is not null)
         {
@@ -1029,6 +1072,11 @@ internal sealed class MainForm : ThemedForm
 
     private void RebuildStatusActions(AppViewState state, Palette p)
     {
+        // Rebuilding disposes and recreates every button on each UpdateDisplay; skip when the
+        // action set and its tone are unchanged (records compare by value).
+        if (lastActionTone == state.Tone && lastActionSet is not null && lastActionSet.SequenceEqual(state.Actions)) return;
+        lastActionTone = state.Tone;
+        lastActionSet = state.Actions;
         foreach (Control control in statusActions.Controls) control.Dispose();
         statusActions.Controls.Clear();
         foreach (var action in state.Actions)
@@ -1065,7 +1113,12 @@ internal sealed class MainForm : ThemedForm
     private void PopulateAddresses()
     {
         var config = server.Config;
-        if (config is null) { addressItems.Clear(); return; }
+        if (config is null) { addressItems.Clear(); lastAddressConfig = null; return; }
+        // Enumerating network adapters is a slow IP-helper call and UpdateDisplay runs on every
+        // state change, so only re-enumerate for a new config or after a refresh interval.
+        if (ReferenceEquals(config, lastAddressConfig) && DateTime.UtcNow - lastAddressRefreshUtc <= TimeSpan.FromSeconds(10)) return;
+        lastAddressConfig = config;
+        lastAddressRefreshUtc = DateTime.UtcNow;
         var selected = addressItems.Count > 0 && selectedAddress < addressItems.Count ? addressItems[selectedAddress].Url : null;
         var items = new List<AddressItem> { new("本机", config.LocalUrl) };
         var urls = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { config.LocalUrl };
@@ -1570,6 +1623,10 @@ internal sealed class MainForm : ThemedForm
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         if (!reallyClosing && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; HideToTray(); return; }
+        // Windows shutdown/logoff and task-manager closes fall through here; without this stop
+        // the server used to survive as an orphan the next launch cannot manage.
+        if (e.CloseReason is CloseReason.WindowsShutDown or CloseReason.TaskManagerClosing or CloseReason.ApplicationExitCall)
+            server.EmergencyStopSync();
         base.OnFormClosing(e);
     }
 
@@ -1577,14 +1634,15 @@ internal sealed class MainForm : ThemedForm
     {
         if (disposing)
         {
+            // The signal thread notices the flag within 250 ms; no wake-up event is needed and
+            // touching the handle here would race the polling loop above.
             stopSignalThread = true;
-            try { showSignal.Set(); } catch (ObjectDisposedException) { }
             logTimer.Stop(); logTimer.Dispose();
             logSearchTimer.Stop(); logSearchTimer.Dispose();
             watchdogTimer.Stop(); watchdogTimer.Dispose();
             managerUpdateTimer.Stop(); managerUpdateTimer.Dispose();
             managerUpdateLifetime.Cancel(); autoUpdateCheck.Cancel(); managerUpdates?.Dispose();
-            log.LineWritten -= OnLogLine; server.Changed -= OnServerChanged;
+            log.LineWritten -= OnLogLine; server.Changed -= OnServerChanged; PendingManagerUpdateStore.Changed -= OnPendingUpdateStoreChanged;
             tray.Visible = false; tray.Dispose(); activeTrayIcon?.Dispose(); trayMenu.Dispose(); toolTip.Dispose();
         }
         base.Dispose(disposing);
