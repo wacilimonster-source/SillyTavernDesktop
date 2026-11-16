@@ -1,0 +1,813 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SillyTavern 管理器 · 体验优化二期 · 高保真原型</title>
+<style>
+/* ============ 设计 Token（一期 §3 + 二期增补） ============ */
+:root{
+  --bg:#F5F6F8; --surface:#FFFFFF; --surfaceMuted:#FAFBFC;
+  --border:#E3E6EB; --borderStrong:#CDD3DB;
+  --t1:#1C2024; --t2:#5A6370; --t3:#8B94A1; --tdis:#B6BCC5;
+  --accent:#3B5BDB; --accentHover:#3451C7; --accentSoft:#EDF1FD;
+  --success:#2F9E63; --successText:#1E7A4A; --successSoft:#EDF8F2;
+  --warning:#B7791F; --warningText:#8A5A12; --warningSoft:#FDF6E9;
+  --danger:#C2453D; --dangerText:#A5342C; --dangerSoft:#FCEFEE;
+  --ext:#7C3AED;
+  --page:#DFE3E9; --focusRing:rgba(59,91,219,.45);
+}
+html[data-theme="dark"]{
+  --bg:#17191D; --surface:#1F2227; --surfaceMuted:#23262C;
+  --border:#30343B; --borderStrong:#3D424B;
+  --t1:#E9EBEE; --t2:#A6ADB8; --t3:#7C8593; --tdis:#565D68;
+  --accent:#7C97FF; --accentHover:#8FA6FF; --accentSoft:#232A44;
+  --success:#4CC38A; --successText:#6FD6A1; --successSoft:#1B2721;
+  --warning:#E0A44A; --warningText:#E7B465; --warningSoft:#2A2318;
+  --danger:#E5736B; --dangerText:#F08C85; --dangerSoft:#2C1E1D;
+  --ext:#B794F6;
+  --page:#0E0F12; --focusRing:rgba(124,151,255,.5);
+}
+*{box-sizing:border-box; margin:0}
+[hidden]{display:none!important}
+html,body{height:100%}
+body{background:var(--page); font-family:"Microsoft YaHei UI","Segoe UI","Microsoft YaHei",sans-serif;
+  color:var(--t1); display:flex; flex-direction:column; align-items:center; overflow:auto;
+  transition:background .16s ease-out}
+
+/* ============ 评审工具条 ============ */
+#review{position:sticky; top:0; z-index:50; width:100%; background:#15171C; color:#A6ADB8;
+  padding:10px 16px; display:flex; flex-wrap:wrap; gap:10px 18px; align-items:center;
+  border-bottom:1px solid #30343B; font-size:12.5px}
+#review .r-label{color:#7C8593; font-weight:600; margin-right:6px}
+#review .r-group{display:flex; align-items:center; flex-wrap:wrap; gap:5px}
+#review button{background:#23262C; color:#C9CFD8; border:1px solid #30343B; border-radius:6px;
+  padding:4px 10px; cursor:pointer; font-size:12px; font-family:inherit}
+#review button:hover{background:#2C3037; color:#E9EBEE}
+#review button.on{background:#3B5BDB; border-color:#3B5BDB; color:#fff}
+#review .r-hint{margin-left:auto; color:#7C8593; font-size:11.5px}
+.v2chip{display:inline-block; background:var(--warning); color:#fff; font-size:9px; font-weight:700;
+  border-radius:4px; padding:1px 4px; margin-left:5px; vertical-align:1px; line-height:1.3}
+#review .v2chip{background:#B7791F}
+
+/* ============ 主窗口 ============ */
+main{padding:28px 16px 8px}
+.window{width:720px; height:600px; background:var(--bg); border-radius:12px; overflow:hidden;
+  border:1px solid var(--border); box-shadow:0 24px 60px rgba(0,0,0,.28);
+  display:flex; flex-direction:column; transition:background .16s ease-out}
+.titlebar{height:40px; flex:0 0 40px; display:flex; align-items:center; padding:0 8px 0 14px; gap:8px;
+  user-select:none}
+.titlebar .appicon{width:18px; height:18px; border-radius:5px; background:linear-gradient(135deg,#C2453D,#8C2B25);
+  display:flex; align-items:center; justify-content:center; color:#fff; font-size:10px; font-weight:800}
+.titlebar .t-title{font-size:14px; font-weight:600; color:var(--t1)}
+.titlebar .t-ver{font-size:10.5px; color:var(--t3); background:var(--surfaceMuted); border:1px solid var(--border);
+  border-radius:999px; padding:1px 8px}
+.titlebar .t-sp{flex:1}
+.tbtn{width:32px; height:32px; border-radius:7px; border:0; background:transparent; color:var(--t2);
+  display:flex; align-items:center; justify-content:center; cursor:pointer}
+.tbtn:hover{background:var(--surfaceMuted); color:var(--t1)}
+.tbtn.close:hover{background:var(--dangerSoft); color:var(--dangerText)}
+.content{flex:1; padding:14px 20px 0; display:flex; flex-direction:column; overflow:hidden}
+
+/* ---- 状态卡 ---- */
+.statuscard{border-radius:10px; border:1px solid var(--border); padding:13px 16px; margin-bottom:12px;
+  display:grid; grid-template-columns:1fr auto; grid-template-rows:auto auto auto; gap:2px 12px;
+  transition:background .16s ease-out,border-color .16s ease-out}
+.statuscard.tone-muted{background:var(--surfaceMuted)}
+.statuscard.tone-success{background:var(--successSoft); border-color:color-mix(in srgb,var(--success) 26%,transparent)}
+.statuscard.tone-warning{background:var(--warningSoft); border-color:color-mix(in srgb,var(--warning) 26%,transparent)}
+.statuscard.tone-danger{background:var(--dangerSoft); border-color:color-mix(in srgb,var(--danger) 26%,transparent)}
+.card-head{display:flex; align-items:center; gap:9px; grid-column:1}
+.dot{width:10px; height:10px; border-radius:50%; flex:0 0 10px}
+.dot.muted{background:var(--t3)} .dot.success{background:var(--success)}
+.dot.warning{background:var(--warning)} .dot.danger{background:var(--danger)}
+.card-title{font-size:18px; font-weight:600; color:var(--t1); line-height:1.25}
+.card-meta{grid-column:1; font-size:11.5px; color:var(--t2); white-space:nowrap; overflow:hidden;
+  text-overflow:ellipsis; line-height:1.6}
+.card-meta .wd{color:var(--successText); font-weight:600}
+.card-actions{grid-column:1; display:flex; align-items:center; gap:4px; margin-top:4px}
+.card-right{grid-column:2; grid-row:1/4; display:flex; align-items:center}
+.btn-primary{height:34px; padding:0 16px; border-radius:8px; border:0; background:var(--accent); color:#fff;
+  font-size:13px; font-weight:600; font-family:inherit; display:flex; align-items:center; gap:7px; cursor:pointer}
+html[data-theme="dark"] .btn-primary{color:#10121A}
+.btn-primary:hover{background:var(--accentHover)}
+.btn-primary:disabled{background:var(--surfaceMuted); color:var(--tdis); cursor:default}
+.btn-quiet{height:28px; padding:0 10px; border-radius:7px; border:0; background:transparent; color:var(--t2);
+  font-size:12.5px; font-family:inherit; display:flex; align-items:center; gap:6px; cursor:pointer}
+.btn-quiet:hover{background:var(--surfaceMuted); color:var(--t1)}
+.btn-quiet.danger:hover{color:var(--dangerText)}
+.btn-quiet:disabled{color:var(--tdis); cursor:default}
+.progressbox{grid-column:1; display:flex; flex-direction:column; gap:7px; margin-top:4px}
+.progressline{display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--t1)}
+.spinner{width:14px; height:14px; border-radius:50%; border:2px solid color-mix(in srgb,var(--accent) 25%,transparent);
+  border-top-color:var(--accent); animation:spin 1s linear infinite; flex:0 0 14px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.elapsed{color:var(--t3); font-size:11.5px}
+.steps{display:flex; flex-wrap:wrap; gap:6px}
+.step{display:flex; align-items:center; gap:5px; height:24px; padding:0 9px; border-radius:999px;
+  border:1px solid var(--border); background:var(--surface); font-size:11.5px; color:var(--t2)}
+.step .sdot{width:13px; height:13px; border-radius:50%; border:1.5px solid var(--borderStrong); flex:0 0 13px}
+.step.done .sdot{border:0; background:var(--success); position:relative}
+.step.done .sdot::after{content:""; position:absolute; left:3.5px; top:1.5px; width:4px; height:7px;
+  border:solid #fff; border-width:0 1.5px 1.5px 0; transform:rotate(45deg)}
+.step.done{color:var(--t1); border-color:color-mix(in srgb,var(--success) 35%,transparent)}
+.step.active{border-color:var(--accent); color:var(--t1)}
+.step.active .sdot{border:2px solid var(--accent); border-top-color:transparent; animation:spin 1s linear infinite}
+.step.failed{border-color:var(--danger); color:var(--dangerText)}
+.step.failed .sdot{border:0; background:var(--danger); position:relative}
+.step.failed .sdot::before,.step.failed .sdot::after{content:""; position:absolute; left:2.5px; top:5.5px;
+  width:6px; height:1.6px; background:#fff}
+.step.failed .sdot::before{transform:rotate(45deg)} .step.failed .sdot::after{transform:rotate(-45deg)}
+.cancelflow{display:flex; align-items:center; gap:8px}
+.cancelflow .hint{font-size:11px; color:var(--t3)}
+
+/* ---- 横幅 ---- */
+.banner{background:var(--accentSoft); border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);
+  border-radius:8px; padding:8px 8px 8px 14px; display:flex; align-items:center; gap:10px; margin-bottom:12px}
+.banner .b-text{flex:1; font-size:12.5px; color:var(--t1)}
+.banner .btn-quiet{color:var(--accent)} html[data-theme="dark"] .banner .btn-quiet{color:var(--accent)}
+.banner .btn-quiet:hover{background:color-mix(in srgb,var(--accent) 12%,transparent)}
+
+/* ---- 区块通用 ---- */
+.section-title{font-size:12px; font-weight:600; color:var(--t2); margin-bottom:7px}
+.addressrow{display:flex; gap:8px; margin-bottom:12px}
+.picker{flex:1; height:40px; background:var(--surface); border:1px solid var(--border); border-radius:8px;
+  display:flex; align-items:center; padding:0 12px; font-size:12.5px; color:var(--t1); gap:8px; cursor:pointer}
+.picker:hover{border-color:var(--borderStrong)}
+.picker .p-name{color:var(--t2)} .picker .p-sp{flex:1} .picker .p-chev{color:var(--t3)}
+.picker.disabled{color:var(--tdis); background:var(--surfaceMuted); cursor:default; border-style:dashed}
+.btn-secondary{height:40px; padding:0 14px; border-radius:8px; border:1px solid var(--border); background:var(--surface);
+  color:var(--t1); font-size:12.5px; font-family:inherit; display:flex; align-items:center; gap:7px; cursor:pointer}
+.btn-secondary:hover{border-color:var(--borderStrong)}
+.btn-secondary.risk:hover{border-color:var(--danger); color:var(--dangerText)}
+.maintrow{display:flex; gap:8px; margin-bottom:12px}
+.btn-maint{height:32px; padding:0 13px; border-radius:8px; border:1px solid var(--border); background:var(--surface);
+  color:var(--t1); font-size:12.5px; font-family:inherit; display:flex; align-items:center; gap:7px; cursor:pointer}
+.btn-maint:hover{border-color:var(--borderStrong)}
+.btn-maint.risk:hover{border-color:var(--danger); color:var(--dangerText)}
+.btn-maint:disabled{color:var(--tdis); cursor:default; background:var(--surfaceMuted)}
+
+/* ---- 日志 ---- */
+.logsection{flex:1; display:flex; flex-direction:column; min-height:0}
+.loghead{display:flex; align-items:center; margin-bottom:7px; gap:8px}
+.loghead .lh-title{font-size:12px; font-weight:600; color:var(--t2)}
+.loghead .lh-count{font-size:11px; color:var(--t3)}
+.loghead .lh-tools{margin-left:auto; display:flex; align-items:center; gap:5px}
+.iconbtn{width:28px; height:28px; border-radius:7px; border:0; background:transparent; color:var(--t2);
+  display:flex; align-items:center; justify-content:center; cursor:pointer; position:relative}
+.iconbtn:hover{background:var(--surfaceMuted); color:var(--t1)}
+.iconbtn.active{background:var(--accentSoft); color:var(--accent)}
+.searchbox{height:26px; width:150px; background:var(--surface); border:1px solid var(--border); border-radius:7px;
+  display:flex; align-items:center; padding:0 8px; gap:5px}
+.searchbox input{border:0; outline:0; background:transparent; color:var(--t1); font-size:12px; font-family:inherit; width:100%}
+.searchbox .ic{color:var(--t3); flex:0 0 13px}
+.seg{display:flex; background:var(--surfaceMuted); border:1px solid var(--border); border-radius:7px; overflow:hidden}
+.seg button{border:0; background:transparent; color:var(--t2); font-size:11.5px; font-family:inherit;
+  padding:4px 10px; cursor:pointer}
+.seg button.on{background:var(--surface); color:var(--t1); font-weight:600}
+.seg button:not(.on):hover{color:var(--t1)}
+.logsurface{flex:1; background:var(--surface); border:1px solid var(--border); border-radius:10px;
+  overflow-y:auto; padding:8px 10px; position:relative; scrollbar-width:thin; scrollbar-color:var(--borderStrong) transparent}
+.logline{display:flex; gap:8px; font-family:"Cascadia Mono",Consolas,monospace; font-size:12px; line-height:20px;
+  border-radius:4px; padding:0 4px}
+.logline:hover{background:var(--surfaceMuted)}
+.logline .lt{color:var(--t3); flex:0 0 auto}
+.logline .lsrc{flex:0 0 auto; font-weight:600}
+.logline .lsrc.svc{color:var(--accent)} .logline .lsrc.mnt{color:var(--ext)} .logline .lsrc.mgr{color:var(--t2)}
+.logline .lbody{color:var(--t1); white-space:pre-wrap; word-break:break-all}
+.logline mark{background:var(--accentSoft); color:var(--t1); font-weight:700; border-radius:3px; padding:0 1px}
+.datesep{display:flex; align-items:center; gap:10px; color:var(--t3); font-size:10.5px; margin:5px 0;
+  font-family:inherit}
+.datesep::before,.datesep::after{content:""; flex:1; height:1px; background:var(--border)}
+.logempty{height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px;
+  color:var(--t3); font-size:12px}
+.backpill{position:absolute; right:14px; bottom:12px; background:var(--surface); border:1px solid var(--border);
+  box-shadow:0 4px 14px rgba(0,0,0,.14); border-radius:999px; padding:5px 12px; font-size:11.5px; color:var(--t1);
+  cursor:pointer; display:flex; align-items:center; gap:5px}
+.backpill:hover{border-color:var(--borderStrong)}
+
+/* ---- 底栏 ---- */
+.footer{flex:0 0 36px; border-top:1px solid var(--border); display:flex; align-items:center; padding:0 14px; gap:16px}
+.flink{border:0; background:transparent; color:var(--t2); font-size:11.5px; font-family:inherit; cursor:pointer;
+  padding:4px 2px}
+.flink:hover{color:var(--t1); text-decoration:underline}
+.flink.exit:hover{color:var(--dangerText); text-decoration:none}
+.footer .f-sp{flex:1}
+
+/* ---- 引导卡 ---- */
+.onboarding{flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px;
+  border:1px dashed var(--borderStrong); border-radius:10px; background:var(--surfaceMuted)}
+.onboarding .ob-title{font-size:16px; font-weight:600}
+.onboarding .ob-desc{font-size:12px; color:var(--t2); max-width:380px; text-align:center; line-height:1.7}
+.onboarding .ob-actions{display:flex; gap:8px; margin-top:4px}
+
+/* ============ 托盘 ============ */
+#taskbar{position:fixed; left:0; right:0; bottom:0; height:34px; background:#101216; display:flex;
+  align-items:center; justify-content:flex-end; padding:0 14px; gap:12px; border-top:1px solid #23262C; z-index:40}
+#taskbar .clock{color:#A6ADB8; font-size:11.5px; font-family:Consolas,monospace}
+#trayIcon{width:24px; height:24px; border-radius:5px; display:flex; align-items:center; justify-content:center;
+  cursor:pointer; position:relative}
+#trayIcon:hover{background:#23262C}
+#trayIcon .ti-logo{width:16px; height:16px; border-radius:4px; background:linear-gradient(135deg,#C2453D,#8C2B25);
+  position:relative}
+#trayIcon .ti-dot{position:absolute; right:1px; bottom:1px; width:7px; height:7px; border-radius:50%;
+  background:var(--success); border:1.5px solid #101216}
+#trayMenu{position:fixed; bottom:40px; width:262px; background:var(--surface); border:1px solid var(--border);
+  border-radius:10px; box-shadow:0 12px 34px rgba(0,0,0,.3); padding:5px; z-index:60; display:none;
+  color:var(--t1)}
+#trayMenu.open{display:block}
+.tm-head{padding:8px 10px 7px; border-bottom:1px solid var(--border); margin-bottom:4px}
+.tm-head .h1{display:flex; align-items:center; gap:7px; font-size:12.5px; font-weight:600}
+.tm-head .h2{font-size:11px; color:var(--t3); margin-top:3px}
+.tm-item{display:flex; align-items:center; gap:10px; padding:7px 10px; border-radius:7px; font-size:12.5px;
+  cursor:pointer; color:var(--t1)}
+.tm-item:hover{background:var(--surfaceMuted)}
+.tm-item .ic{color:var(--t2)}
+.tm-item .tm-key{margin-left:auto; font-size:10.5px; color:var(--t3)}
+.tm-item.bold{font-weight:700}
+.tm-item.danger{color:var(--dangerText)}
+.tm-item.danger .ic{color:var(--dangerText)}
+.tm-item.danger:hover{background:var(--dangerSoft)}
+.tm-item.disabled{color:var(--tdis); cursor:default}
+.tm-item.disabled:hover{background:transparent}
+.tm-sep{height:1px; background:var(--border); margin:4px 6px}
+
+/* ============ 对话框 ============ */
+#overlay{position:fixed; inset:0; background:rgba(10,11,14,.44); z-index:70; display:flex;
+  align-items:center; justify-content:center}
+#overlay[hidden]{display:none}
+.dialog{background:var(--bg); border:1px solid var(--border); border-radius:12px; box-shadow:0 24px 70px rgba(0,0,0,.4);
+  width:420px; overflow:hidden}
+.dialog .d-titlebar{height:36px; display:flex; align-items:center; padding:0 8px 0 14px; font-size:13px;
+  font-weight:600; color:var(--t1); border-bottom:1px solid var(--border)}
+.dialog .d-body{padding:16px; font-size:12.5px; color:var(--t1); line-height:1.8}
+.dialog .d-body .d-sub{color:var(--t2)}
+.dialog .d-foot{display:flex; justify-content:flex-end; gap:8px; padding:12px 16px; border-top:1px solid var(--border)}
+.dlg-danger{background:var(--danger); border-color:var(--danger); color:#fff}
+.dlg-danger:hover{background:color-mix(in srgb,var(--danger) 88%,#000)}
+
+/* ---- 设置窗口 ---- */
+.setwin{width:560px; max-height:82vh; display:flex; flex-direction:column}
+.setwin .sw-body{padding:14px 20px; overflow-y:auto}
+.sw-section{padding:12px 0 4px}
+.sw-section+.sw-section{border-top:1px solid var(--border)}
+.sw-title{font-size:12px; font-weight:600; color:var(--t2); margin-bottom:10px}
+.sw-row{display:flex; align-items:center; min-height:34px; font-size:12.5px; color:var(--t2)}
+.sw-row.indent{padding-left:24px; color:var(--t3)}
+.sw-row .sw-sp{flex:1}
+.toggle{width:40px; height:22px; border-radius:999px; background:var(--borderStrong); position:relative;
+  cursor:pointer; flex:0 0 40px; transition:background .12s}
+.toggle::after{content:""; position:absolute; left:2px; top:2px; width:18px; height:18px; border-radius:50%;
+  background:#fff; transition:left .12s; box-shadow:0 1px 3px rgba(0,0,0,.25)}
+.toggle.on{background:var(--accent)}
+.toggle.on::after{left:20px}
+.toggle.disabled{opacity:.45; cursor:default}
+.sw-dirrow{display:flex; gap:8px; margin:6px 0}
+.sw-input{flex:1; height:36px; background:var(--surface); border:1px solid var(--border); border-radius:8px;
+  display:flex; align-items:center; padding:0 10px; font-size:12px; color:var(--t1); overflow:hidden;
+  white-space:nowrap; text-overflow:ellipsis}
+.sw-hint{font-size:11px; color:var(--t3); margin:4px 0 2px}
+.sw-seg{display:inline-flex; background:var(--surfaceMuted); border:1px solid var(--border); border-radius:8px; overflow:hidden}
+.sw-seg button{border:0; background:transparent; color:var(--t2); font-size:12px; font-family:inherit;
+  padding:5px 13px; cursor:pointer}
+.sw-seg button.on{background:var(--surface); color:var(--t1); font-weight:600}
+.sw-crashrow{display:flex; align-items:center; gap:10px; font-size:12px; color:var(--t2)}
+
+/* ============ Toast ============ */
+#toast{position:fixed; right:26px; top:76px; z-index:80; background:var(--surface); border:1px solid var(--border);
+  border-radius:10px; box-shadow:0 10px 30px rgba(0,0,0,.22); padding:9px 14px; font-size:12.5px; color:var(--t1);
+  display:flex; align-items:center; gap:8px; opacity:0; transform:translateY(-6px); pointer-events:none;
+  transition:opacity .2s ease-out,transform .2s ease-out; max-width:320px}
+#toast.show{opacity:1; transform:none}
+#toast .ic{color:var(--success)}
+
+/* ============ 评审要点 ============ */
+#notes{width:720px; margin:14px 16px 56px; font-size:12px; color:var(--t2); line-height:2}
+#notes b{color:var(--t1)}
+html[data-theme="dark"] #notes{color:#A6ADB8}
+html[data-theme="dark"] #notes b{color:#E9EBEE}
+
+.ic{width:15px; height:15px; flex:0 0 15px}
+.ic.small{width:13px; height:13px; flex-basis:13px}
+</style>
+</head>
+<body>
+
+<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-play" viewBox="0 0 24 24"><polygon points="6 4 20 12 6 20" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></symbol>
+  <symbol id="i-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.2" y2="16.2"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16" rx="1" fill="currentColor" stroke="none"/><rect x="14" y="4" width="4" height="16" rx="1" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.6 4.6l2.1 2.1M17.3 17.3l2.1 2.1M19.4 4.6l-2.1 2.1M6.7 17.3l-2.1 2.1"/></symbol>
+  <symbol id="i-power" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></symbol>
+  <symbol id="i-repair" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></symbol>
+  <symbol id="i-minus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></symbol>
+  <symbol id="i-history" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-3.6 8-10V5l-8-3-8 3v7c0 6.4 8 10 8 10z"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></symbol>
+</svg>
+
+<header id="review">
+  <div class="r-group"><span class="r-label">状态</span><div class="r-group" id="stateBtns" style="gap:5px"></div></div>
+  <div class="r-group"><span class="r-label">变体</span>
+    <button id="tgBanner">管理器更新横幅</button>
+    <button id="tgWatchdog">看门狗徽标</button>
+    <button id="tgSlow">慢启动文案</button>
+  </div>
+  <div class="r-group"><span class="r-label">主题</span><button id="tgTheme">切换深色</button></div>
+  <div class="r-group"><span class="r-label">演示</span>
+    <button data-demo="settings">设置窗口</button>
+    <button data-demo="stop">停止三选一</button>
+    <button data-demo="confirm">更新确认</button>
+    <button data-demo="toast">Toast</button>
+    <button data-demo="tray">托盘菜单</button>
+  </div>
+  <div class="r-hint">窗口下方有任务栏，右键托盘图标也可打开菜单 · <span class="v2chip">v2</span> = 二期新增元素</div>
+</header>
+
+<main>
+  <div class="window" id="win">
+    <div class="titlebar">
+      <div class="appicon">ST</div>
+      <span class="t-title">SillyTavern 管理器</span>
+      <span class="t-ver">v1.3.0</span>
+      <span class="t-sp"></span>
+      <button class="tbtn" title="设置" onclick="openSettings()"><svg class="ic"><use href="#i-settings"/></svg></button>
+      <button class="tbtn" title="收起到托盘"><svg class="ic"><use href="#i-minus"/></svg></button>
+      <button class="tbtn close" title="关闭（隐藏到托盘）"><svg class="ic"><use href="#i-close"/></svg></button>
+    </div>
+
+    <div class="content" id="content">
+      <div class="statuscard tone-muted" id="card">
+        <div class="card-head">
+          <div class="dot muted" id="dot"></div>
+          <div class="card-title" id="stTitle">已停止</div>
+        </div>
+        <div class="card-meta" id="stMeta"></div>
+        <div class="card-actions" id="stActions"></div>
+        <div class="card-right" id="stRight"></div>
+        <div class="progressbox" id="stProgress" hidden>
+          <div class="progressline">
+            <div class="spinner" id="pSpin"></div>
+            <span id="pLabel"></span>
+            <span class="elapsed" id="pElapsed"></span>
+          </div>
+          <div class="steps" id="pSteps" hidden></div>
+          <div class="cancelflow" id="pCancel" hidden>
+            <button class="btn-quiet" id="pCancelBtn" style="height:24px;padding:0 8px;font-size:11.5px">取消</button>
+            <span class="hint" id="pCancelHint"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="banner" id="banner" hidden>
+        <span class="b-text">管理器 v1.4.0 已就绪，退出时自动安装</span>
+        <button class="btn-quiet">立即重启并更新</button>
+        <button class="iconbtn" title="忽略管理器更新提示"><svg class="ic"><use href="#i-close"/></svg></button>
+      </div>
+
+      <div id="mainSections">
+        <div class="section-title">访问地址</div>
+        <div class="addressrow">
+          <div class="picker" id="addrPicker"><span class="p-name">本机</span><span>http://127.0.0.1:8000/</span><span class="p-sp"></span><svg class="ic small p-chev"><use href="#i-chev"/></svg></div>
+          <button class="btn-secondary" id="copyAddr"><svg class="ic"><use href="#i-copy"/></svg>复制<span class="v2chip">v2</span></button>
+        </div>
+
+        <div class="section-title">更新与维护</div>
+        <div class="maintrow">
+          <button class="btn-maint"><svg class="ic"><use href="#i-refresh"/></svg>检查更新</button>
+          <button class="btn-maint risk" id="mUpd"><svg class="ic"><use href="#i-download"/></svg>更新 ST</button>
+          <button class="btn-maint risk"><svg class="ic"><use href="#i-repair"/></svg>依赖修复</button>
+        </div>
+
+        <div class="logsection">
+          <div class="loghead">
+            <span class="lh-title">日志</span>
+            <span class="lh-count" id="logCount"></span>
+            <div class="lh-tools">
+              <button class="iconbtn" id="btnDiag" title="复制诊断信息（版本、状态、最近日志）"><svg class="ic"><use href="#i-history"/></svg></button>
+              <span class="v2chip" style="margin-left:-2px">v2</span>
+              <button class="iconbtn" id="btnPause" title="暂停滚动"><svg class="ic"><use href="#i-pause"/></svg></button>
+              <button class="iconbtn" id="btnCopyLog" title="复制日志"><svg class="ic"><use href="#i-copy"/></svg></button>
+              <button class="iconbtn" title="打开日志目录"><svg class="ic"><use href="#i-folder"/></svg></button>
+              <div class="searchbox"><svg class="ic small"><use href="#i-search"/></svg><input id="searchInput" placeholder="搜索日志（Ctrl+F）"></div>
+              <div class="seg" id="segSrc">
+                <button class="on">全部</button><button>服务</button><button>维护</button><button>管理器</button>
+              </div>
+            </div>
+          </div>
+          <div class="logsurface" id="logSurface"><div id="logLines"></div></div>
+        </div>
+      </div>
+
+      <div class="onboarding" id="onboarding" hidden>
+        <div class="ob-title">选择 SillyTavern 目录</div>
+        <div class="ob-desc">目录中需要包含 server.js。管理器不会修改现有配置，只负责后台运行、日志与官方更新命令。</div>
+        <div class="ob-actions">
+          <button class="btn-primary" style="height:32px"><svg class="ic"><use href="#i-folder"/></svg>浏览…</button>
+          <button class="btn-quiet">查看日志<span class="v2chip">v2</span></button>
+          <button class="btn-quiet">了解管理器能做什么<span class="v2chip">v2</span></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <button class="flink">日志目录</button>
+      <button class="flink">打开配置</button>
+      <button class="flink">数据目录</button>
+      <span class="f-sp"></span>
+      <button class="flink exit">退出程序</button>
+    </div>
+  </div>
+
+  <div id="notes">
+    <b>评审要点</b>（细节见《体验优化二期-产品设计.md》）：
+    ① 状态卡元信息重排——ST 版本在前、管理器版本移除、运行时长与看门狗徽标
+    ② 更新 / 停止的分步进度与已耗时（切到「更新中」「停止中」查看）
+    ③ 端口占用显示占用进程 PID（切到「端口占用」）
+    ④ 失败 / 占用态的「复制诊断」次操作，日志工具栏同样有入口
+    ⑤ 日志时间折叠与跨日日期分隔（当日 HH:mm:ss，复制内容仍为全量时间戳）
+    ⑥ 托盘菜单：复制诊断项 + 快捷键提示（右键任务栏托盘图标）
+    ⑦ 设置窗口：外观三选项、崩溃报告入口（点工具条「设置窗口」）
+  </div>
+</main>
+
+<!-- 托盘 -->
+<div id="taskbar">
+  <span class="clock" id="tbClock">00:00</span>
+  <div id="trayIcon" title="SillyTavern：运行中">
+    <div class="ti-logo"><div class="ti-dot"></div></div>
+  </div>
+</div>
+
+<div id="trayMenu">
+  <div class="tm-head">
+    <div class="h1"><span class="dot success" style="width:9px;height:9px"></span><span id="tmStatus">运行中 · 端口 8000</span></div>
+    <div class="h2" id="tmSub">ST 1.19.0 · 管理器 v1.3.0</div>
+  </div>
+  <div class="tm-item bold"><svg class="ic"><use href="#i-open"/></svg>打开 SillyTavern</div>
+  <div class="tm-item"><svg class="ic"><use href="#i-history"/></svg>打开管理窗口</div>
+  <div class="tm-sep"></div>
+  <div class="tm-item"><svg class="ic"><use href="#i-stop"/></svg>停止服务</div>
+  <div class="tm-item"><svg class="ic"><use href="#i-refresh"/></svg>重启服务</div>
+  <div class="tm-sep"></div>
+  <div class="tm-item"><svg class="ic"><use href="#i-refresh"/></svg>检查 ST 更新</div>
+  <div class="tm-item"><svg class="ic"><use href="#i-download"/></svg>检查管理器更新</div>
+  <div class="tm-item"><svg class="ic"><use href="#i-repair"/></svg>依赖修复</div>
+  <div class="tm-item" id="tmDiag"><svg class="ic"><use href="#i-history"/></svg>复制诊断<span class="tm-key v2chip">v2</span></div>
+  <div class="tm-sep"></div>
+  <div class="tm-item"><svg class="ic"><use href="#i-settings"/></svg>设置<span class="tm-key">Ctrl+,</span></div>
+  <div class="tm-sep"></div>
+  <div class="tm-item danger"><svg class="ic"><use href="#i-power"/></svg>退出（并停止服务）</div>
+</div>
+
+<!-- 对话框 -->
+<div id="overlay" hidden>
+  <div class="dialog" id="dlgStop" hidden>
+    <div class="d-titlebar">服务尚未退出<span class="v2chip">v2</span><span style="flex:1"></span></div>
+    <div class="d-body">
+      SillyTavern 没有在 8 秒内退出<span class="v2chip">v2</span>。<br>
+      <span class="d-sub">强制结束可能中断尚未完成的操作。</span>
+    </div>
+    <div class="d-foot">
+      <button class="btn-secondary" style="height:32px" onclick="closeOverlay()">取消操作</button>
+      <button class="btn-secondary" style="height:32px" onclick="closeOverlay()">继续等待</button>
+      <button class="btn-primary dlg-danger" style="height:32px" onclick="closeOverlay()">强制结束</button>
+    </div>
+  </div>
+
+  <div class="dialog" id="dlgConfirm" hidden>
+    <div class="d-titlebar">更新 SillyTavern</div>
+    <div class="d-body">
+      更新将按官方命令依次执行：<br>
+      <span class="d-sub">
+        1. 预检 Git 状态与上游<br>
+        2. 停止由管理器启动的服务<br>
+        3. git pull --rebase --autostash<br>
+        4. npm install（生产依赖）<br>
+        5. 重新启动服务
+      </span><br>
+      <span class="d-sub">正在进行的聊天可能中断；本地未提交修改会阻止更新。</span>
+    </div>
+    <div class="d-foot">
+      <button class="btn-secondary" style="height:32px" onclick="closeOverlay()">取消</button>
+      <button class="btn-primary" style="height:32px" onclick="closeOverlay();setState('updating')">开始更新</button>
+    </div>
+  </div>
+
+  <div class="dialog setwin" id="dlgSettings" hidden>
+    <div class="d-titlebar">设置</div>
+    <div class="sw-body">
+      <div class="sw-section">
+        <div class="sw-title">外观 <span class="v2chip">v2</span></div>
+        <div class="sw-row">
+          <div class="sw-seg"><button class="on">跟随系统</button><button>浅色</button><button>深色</button></div>
+        </div>
+      </div>
+      <div class="sw-section">
+        <div class="sw-title">安装位置</div>
+        <div class="sw-dirrow">
+          <div class="sw-input">G:\st\SillyTavern-Launcher\SillyTavern</div>
+          <button class="btn-maint"><svg class="ic"><use href="#i-folder"/></svg>浏览…</button>
+        </div>
+        <div class="sw-hint">目录中需包含 server.js；更换目录前需停止服务。</div>
+      </div>
+      <div class="sw-section">
+        <div class="sw-title">启动行为</div>
+        <div class="sw-row">登录 Windows 后启动管理器<span class="sw-sp"></span><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+        <div class="sw-row indent">登录自启时自动打开浏览器<span class="sw-sp"></span><div class="toggle disabled" onclick="return"></div></div>
+        <div class="sw-row">启动管理器后自动启动 SillyTavern<span class="sw-sp"></span><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+        <div class="sw-row">服务崩溃或心跳超时后自动重启（看门狗）<span class="sw-sp"></span><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+      </div>
+      <div class="sw-section">
+        <div class="sw-title">更新</div>
+        <div class="sw-row">自动检查并下载管理器更新<span class="sw-sp"></span><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+        <div class="sw-row">当前版本 v1.3.0<span class="sw-sp"></span><button class="btn-maint"><svg class="ic"><use href="#i-refresh"/></svg>检查管理器更新</button></div>
+      </div>
+      <div class="sw-section">
+        <div class="sw-title">关于</div>
+        <div class="sw-row">崩溃报告：0 份 · <button class="flink" style="font-size:12px">打开目录</button><span class="v2chip">v2</span><span class="sw-sp"></span></div>
+        <div class="sw-hint">本程序不修改 SillyTavern 配置；日志与设置存于 %LOCALAPPDATA%\SillyTavernTray。</div>
+      </div>
+    </div>
+    <div class="d-foot">
+      <button class="btn-secondary" style="height:34px" onclick="closeOverlay()">取消</button>
+      <button class="btn-primary" style="height:34px" onclick="closeOverlay();showToast('设置已保存')">保存</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"><svg class="ic"><use href="#i-check"/></svg><span id="toastText"></span></div>
+
+<script>
+"use strict";
+/* ================= 状态定义 ================= */
+const ICONS = { play:"i-play", stop:"i-stop", refresh:"i-refresh", open:"i-open", folder:"i-folder" };
+const BASE_META = "ST 1.19.0 · 端口 8000 · release · 认证未开";
+const UP = "已运行 2 小时 14 分";
+const STATES = {
+  unconfigured:{ tone:"muted", title:"未配置", meta:"管理器 v1.3.0 · 等待读取 ST 配置",
+    primary:{t:"选择目录", i:"folder"}, actions:[{t:"打开设置"}], onboarding:true,
+    addrOff:true, logEmpty:true },
+  stopped:{ tone:"muted", title:"已停止", meta:BASE_META,
+    primary:{t:"启动服务", i:"play"}, actions:[{t:"打开 SillyTavern", disabled:true}], addrOff:true },
+  starting:{ tone:"warning", title:"正在启动…", meta:BASE_META, primary:null,
+    progress:{ label:"正在启动，等待服务响应…", elapsedFrom:12 } },
+  running:{ tone:"success", title:"运行中", primary:{t:"打开 SillyTavern", i:"open"},
+    actions:[{t:"停止服务", danger:true},{t:"重启"}], uptime:true, meta:BASE_META },
+  stopping:{ tone:"warning", title:"正在停止…", meta:BASE_META, primary:null,
+    progress:{ label:"正在停止服务…", elapsedFrom:8, steps:["预检","停止服务"], stepIdx:1 },
+    cancelHint:"等待退出中，超时将询问如何处理" },
+  failed:{ tone:"danger", title:"服务异常退出", meta:BASE_META + " · 退出码 -1073741510 · 已运行 1 小时 3 分",
+    primary:{t:"启动服务", i:"play"}, actions:[{t:"查看日志"},{t:"复制诊断", diag:true}], addrOff:true },
+  occupied:{ tone:"danger", title:"端口 8000 被占用", meta:BASE_META + " · 占用进程 node.exe (PID 59672)",
+    note:"若为上次异常退出留下的服务，可结束该进程后点「重新检测」",
+    primary:{t:"重新检测", i:"refresh"}, actions:[{t:"查看日志"},{t:"复制诊断", diag:true}], addrOff:true },
+  configError:{ tone:"danger", title:"配置读取失败", meta:"管理器 v1.3.0 · config.yaml 无法解析",
+    primary:{t:"重新读取", i:"refresh"}, actions:[{t:"打开设置"},{t:"查看日志"},{t:"复制诊断", diag:true}], addrOff:true },
+  updating:{ tone:"warning", title:"正在更新 SillyTavern…", meta:BASE_META, primary:null,
+    progress:{ label:"正在拉取更新…", elapsedFrom:252, cancelHint:"预检阶段可取消；拉取开始后无法安全取消",
+      steps:["预检","停止服务","拉取更新","安装依赖","重启服务"], stepIdx:2, stepDone:2 } },
+  repairing:{ tone:"warning", title:"正在安装依赖…", meta:BASE_META, primary:null,
+    progress:{ label:"正在安装依赖…", elapsedFrom:95, cancelHint:"此阶段无法安全取消（npm 半安装会损坏 node_modules）",
+      steps:["预检","停止服务","安装依赖","重启服务"], stepIdx:2, stepDone:1 } },
+  checking:{ tone:"warning", title:"正在检查更新…", meta:BASE_META, primary:null,
+    progress:{ label:"正在检查更新…", elapsedFrom:3 } },
+};
+let cur = "running", bannerOn = false, wdOn = true, elapsedTimer = null, elapsedBase = 0;
+
+/* ================= 渲染 ================= */
+const $ = id => document.getElementById(id);
+function ico(name, cls){ return `<svg class="ic ${cls||""}"><use href="#${ICONS[name]||name}"/></svg>`; }
+function render(){
+  const s = STATES[cur];
+  const card = $("card");
+  card.className = "statuscard tone-" + s.tone;
+  $("dot").className = "dot " + s.tone;
+  let title = s.title;
+  if (cur === "starting" && $("tgSlow").classList.contains("on")) title = "启动较慢，请查看日志";
+  $("stTitle").textContent = title;
+  let meta = s.meta || "";
+  if (s.uptime) meta += " · " + UP;
+  if (s.uptime && wdOn) meta += ` · <span class="wd">看门狗 23:41 自动重启</span><span class="v2chip">v2</span>`;
+  if (s.note) meta += "<br>" + s.note;
+  $("stMeta").innerHTML = meta || "&nbsp;";
+
+  // 右侧：主按钮 或 进度
+  $("stRight").innerHTML = "";
+  $("stProgress").hidden = !s.progress;
+  if (s.progress){
+    startElapsed(s.progress.elapsedFrom||0);
+    $("pLabel").textContent = s.progress.label;
+    $("pSpin").style.display = "";
+    const steps = s.progress.steps;
+    $("pSteps").hidden = !steps;
+    if (steps){
+      $("pSteps").innerHTML = steps.map((t,i)=>{
+        const done = i < (s.progress.stepDone??0), active = i === s.progress.stepIdx,
+              failed = s.progress.stepFailedIdx === i;
+        const cls = failed ? "failed" : done ? "done" : active ? "active" : "";
+        const dot = failed ? "" : done ? "" : "";
+        return `<div class="step ${cls}"><div class="sdot"></div>${t}</div>`;
+      }).join("");
+    }
+    $("pCancel").hidden = !s.progress.cancelHint;
+    if (s.progress.cancelHint){
+      // 仅预检阶段（stepIdx 0）可取消；其后禁用并说明原因
+      $("pCancelBtn").disabled = (s.progress.stepIdx ?? 0) > 0;
+      $("pCancelHint").textContent = s.progress.cancelHint;
+    }
+  } else stopElapsed();
+  if (s.primary){
+    $("stRight").innerHTML = `<button class="btn-primary">${ico(s.primary.i)}${s.primary.t}</button>`;
+  }
+
+  // 次操作
+  const acts = s.actions || [];
+  $("stActions").innerHTML = acts.map(a =>
+    `<button class="btn-quiet ${a.danger?"danger":""}" ${a.disabled?"disabled":""}
+      ${a.diag?'onclick="copyDiag()"':""}>${a.t}${a.diag?'<span class="v2chip">v2</span>':""}</button>`).join("");
+
+  // 横幅
+  $("banner").hidden = !(bannerOn && !s.onboarding);
+
+  // 区块可用性
+  const busy = !!s.progress || cur === "unconfigured";
+  $("mainSections").hidden = !!s.onboarding;
+  $("onboarding").hidden = !s.onboarding;
+  $("addrPicker").classList.toggle("disabled", !!s.addrOff);
+  $("copyAddr").disabled = !!s.addrOff;
+  document.querySelectorAll(".btn-maint").forEach(b => b.disabled = busy);
+  $("addrPicker").innerHTML = s.addrOff
+    ? `<span class="p-name">服务未运行</span><span class="p-sp"></span><svg class="ic small p-chev"><use href="#i-chev"/></svg>`
+    : `<span class="p-name">本机</span><span>http://127.0.0.1:8000/</span><span class="p-sp"></span><svg class="ic small p-chev"><use href="#i-chev"/></svg>`;
+
+  // 托盘
+  $("tmStatus").textContent = (s.tone==="muted"?"已停止":s.title.replace(/…$/,"")) + (s.uptime?" · 端口 8000":"");
+  $("trayIcon").querySelector(".ti-dot").style.background =
+    { success:"var(--success)", warning:"var(--warning)", danger:"var(--danger)", muted:"var(--t3)" }[s.tone];
+  renderLog();
+}
+/* ---- 耗时计时 ---- */
+function startElapsed(from){
+  elapsedBase = from;
+  clearInterval(elapsedTimer);
+  const tick = () => {
+    const sec = elapsedBase + Math.floor((Date.now()-t0)/1000), m = Math.floor(sec/60);
+    $("pElapsed").textContent = sec>0 ? `· 已${m>=1?`等待 ${m} 分 ${sec%60} 秒`:`等待 ${sec} 秒`}` : "";
+  };
+  const t0 = Date.now();
+  tick(); elapsedTimer = setInterval(tick, 1000);
+}
+function stopElapsed(){ clearInterval(elapsedTimer); }
+
+/* ================= 日志 ================= */
+const LOG = [
+  ["2026-11-15 22:31:04","服务","svc","SillyTavern 1.19.0 正在初始化…"],
+  ["2026-11-15 22:31:06","服务","svc","Instantiated the tokenizer for deepseek-v4.1"],
+  ["2026-11-15 22:31:09","服务","svc","SillyTavern is listening on 127.0.0.1:8000"],
+  ["2026-11-16 23:58:41","管理器","mgr","正在后台启动 SillyTavern（--listen）。"],
+  ["2026-11-16 23:58:42","服务","svc","SillyTavern 1.19.0 · release"],
+  ["2026-11-16 23:58:43","服务","svc","Instantiated the tokenizer for deepseek-v4.1"],
+  ["2026-11-16 23:58:44","服务","svc","Available models: agent/google/gemini-4-argon, as/gemini-3.5-flash-lite, ss/deepseek-v4.1-flash-1017 …"],
+  ["2026-11-16 23:58:45","服务","svc","whitelist mode is enabled; 2 addresses allowed"],
+  ["2026-11-16 23:58:46","管理器","mgr","服务已就绪（探测 2 次）。"],
+  ["2026-11-16 23:59:56","服务","svc","[main] Loading extensions: 12 built-in, 3 third-party"],
+  ["2026-11-16 23:59:57","服务","svc","GET /login 200 · 12ms"],
+  ["2026-11-16 00:00:12","维护","mnt","检查更新：git fetch 完成，上游领先 1 个提交。"],
+  ["2026-11-16 00:00:14","管理器","mgr","看门狗：服务无响应（64 秒），准备自动重启。"],
+  ["2026-11-16 00:00:17","管理器","mgr","看门狗：服务已自动重启。"],
+];
+function todayPart(ts){ return ts.slice(11); }
+function dateOf(ts){ return ts.slice(5,10).replace("-"," 月 ").replace("-"," 日 "); }
+let paused = false, curSeg = "全部";
+function renderLog(){
+  const box = $("logLines");
+  const q = $("searchInput").value.trim();
+  const lines = LOG.filter(l => curSeg === "全部" || l[1] === curSeg);
+  const matches = lines.filter(l => !q || l[3].toLowerCase().includes(q.toLowerCase()));
+  let html = "", lastDate = null;
+  for (const l of matches){
+    const d = l[0].slice(0,10);
+    if (d !== lastDate){ html += `<div class="datesep">── ${dateOf(l[0])} <span class="v2chip">v2</span> ──</div>`; lastDate = d; }
+    let body = l[3].replace(/&/g,"&amp;").replace(/</g,"&lt;");
+    if (q){
+      const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"),"gi");
+      body = body.replace(rx, m => `<mark>${m}</mark>`);
+    }
+    html += `<div class="logline" title="${l[0]}"><span class="lt">${todayPart(l[0])}</span><span class="lsrc ${l[2]}">[${l[1]}]</span><span class="lbody">${body}</span></div>`;
+  }
+  if (!matches.length) html = `<div class="logempty" style="width:100%"><div>没有匹配的日志</div><div style="font-size:11px">试试清除搜索词或切换来源</div></div>`;
+  box.innerHTML = html;
+  const cnt = $("logCount");
+  cnt.textContent = q ? `${matches.length} / ${lines.length} 条` : (matches.length ? `${matches.length} 行` : "");
+  cnt.style.display = q ? "" : (matches.length ? "" : "none");
+}
+$("searchInput").addEventListener("input", renderLog);
+document.querySelectorAll("#segSrc button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("#segSrc button").forEach(x => x.classList.remove("on"));
+  b.classList.add("on"); curSeg = b.textContent; renderLog();
+});
+$("btnPause").onclick = () => {
+  paused = !paused;
+  $("btnPause").innerHTML = `<svg class="ic"><use href="#i-${paused?"play":"pause"}"/></svg>`;
+  $("btnPause").classList.toggle("active", paused);
+  $("btnPause").title = paused ? "继续滚动" : "暂停滚动";
+  let pill = document.querySelector(".backpill");
+  if (paused){
+    if (!pill){ pill = document.createElement("div"); pill.className = "backpill";
+      pill.innerHTML = `已暂停 · 回到底部 <svg class="ic small"><use href="#i-down"/></svg>`;
+      pill.onclick = () => $("btnPause").onclick(); $("logSurface").appendChild(pill); }
+  } else if (pill) pill.remove();
+};
+$("btnCopyLog").onclick = () => showToast("已复制 14 行日志（含完整时间戳）");
+$("btnDiag").onclick = () => copyDiag();
+function copyDiag(){
+  const text = `── SillyTavern 管理器诊断 ──
+生成时间：2026-11-16 00:12:33
+管理器：v1.3.0
+服务状态：运行中（已运行 2 小时 14 分）
+SillyTavern：1.19.0 · 分支 release · 端口 8000
+访问安全：白名单开 · 认证未开
+看门狗：已启用 · 本次会话自动重启 1 次（最近 00:00:17）
+崩溃报告：0 份
+日志目录：%LOCALAPPDATA%\\SillyTavernTray\\logs`;
+  try { navigator.clipboard.writeText(text); } catch(e){}
+  showToast("已复制诊断信息（版本、状态、最近日志）");
+}
+$("copyAddr").onclick = () => showToast("地址已复制");
+$("mUpd").onclick = () => openDemo("confirm");
+$("pCancelBtn").onclick = () => { showToast("已取消更新"); setState("stopped"); };
+
+/* ================= 状态切换 / 变体 ================= */
+const STATE_LABELS = [
+  ["unconfigured","未配置"],["stopped","已停止"],["starting","启动中"],["running","运行中"],
+  ["stopping","停止中"],["failed","异常退出"],["occupied","端口占用"],["configError","配置失败"],
+  ["updating","更新中"],["repairing","修复中"],["checking","检查更新中"]];
+for (const [k,label] of STATE_LABELS){
+  const b = document.createElement("button");
+  b.textContent = label; b.onclick = () => setState(k);
+  b.dataset.k = k; $("stateBtns").appendChild(b);
+}
+function setState(k){
+  cur = k;
+  document.querySelectorAll("#stateBtns button").forEach(b => b.classList.toggle("on", b.dataset.k === k));
+  render();
+}
+$("tgBanner").onclick = e => { bannerOn = !bannerOn; e.target.classList.toggle("on", bannerOn); render(); };
+$("tgWatchdog").onclick = e => { wdOn = !wdOn; e.target.classList.toggle("on", wdOn); render(); };
+$("tgSlow").onclick = e => { e.target.classList.toggle("on"); render(); };
+$("tgTheme").onclick = () => {
+  const dark = document.documentElement.dataset.theme === "dark";
+  document.documentElement.dataset.theme = dark ? "light" : "dark";
+  $("tgTheme").textContent = dark ? "切换深色" : "切换浅色";
+};
+
+/* ================= 演示：托盘 / 对话框 / Toast ================= */
+function openDemo(name){
+  $("overlay").hidden = false;
+  ["dlgStop","dlgConfirm","dlgSettings"].forEach(id => $(id).hidden = id !== "dlg"+name[0].toUpperCase()+name.slice(1));
+}
+function openSettings(){ openDemo("settings"); }
+function closeOverlay(){ $("overlay").hidden = true; }
+$("overlay").addEventListener("click", e => { if (e.target === $("overlay")) closeOverlay(); });
+document.querySelectorAll("[data-demo]").forEach(b => b.onclick = () => {
+  const d = b.dataset.demo;
+  if (d === "tray"){ toggleTray(); return; }
+  openDemo(d);
+});
+let toastTimer;
+function showToast(text){
+  $("toastText").textContent = text;
+  $("toast").classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $("toast").classList.remove("show"), 2500);
+}
+/* 托盘菜单 */
+let trayOpen = false;
+function toggleTray(){ trayOpen = !trayOpen; $("trayMenu").classList.toggle("open", trayOpen); }
+$("trayIcon").onclick = () => { if (trayOpen) toggleTray(); else { trayOpen = true; $("trayMenu").classList.add("open"); } };
+$("trayIcon").oncontextmenu = e => { e.preventDefault(); if (!trayOpen) toggleTray(); };
+$("tmDiag").onclick = () => { toggleTray(); copyDiag(); };
+document.addEventListener("click", e => {
+  if (trayOpen && !$("trayMenu").contains(e.target) && !$("trayIcon").contains(e.target) && e.target.closest("[data-demo]")?.dataset.demo !== "tray")
+    toggleTray();
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape"){ closeOverlay(); if (trayOpen) toggleTray(); } });
+/* 任务栏时钟 */
+setInterval(() => { const d = new Date(); $("tbClock").textContent =
+  `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`; }, 1000);
+/* 初始 */
+$("tgWatchdog").classList.add("on");
+setState("running");
+</script>
+</body>
+</html>

@@ -62,10 +62,25 @@ internal sealed class Palette
 internal static class Theme
 {
     private static bool initialized;
+    private static int appearanceMode; // 0 = follow system, 1 = light, 2 = dark
 
     public static bool IsDark { get; private set; }
     public static Palette Current => IsDark ? Dark : Light;
     public static event Action? Changed;
+
+    /// <summary>
+    /// Pins the palette to a fixed light/dark mode (or back to following the system).
+    /// A fixed mode no longer reacts to WM_SETTINGCHANGE; only ResolveDark decides.
+    /// </summary>
+    public static void ApplyAppearance(int mode)
+    {
+        appearanceMode = Math.Clamp(mode, 0, 2);
+        if (!initialized) { Initialize(); return; }
+        var dark = ResolveDark();
+        if (dark == IsDark) return;
+        IsDark = dark;
+        Changed?.Invoke();
+    }
 
     public static readonly Palette Light = new()
     {
@@ -152,6 +167,8 @@ internal static class Theme
 
     private static bool ResolveDark()
     {
+        if (appearanceMode == 1) return false;
+        if (appearanceMode == 2) return true;
         var forced = Environment.GetEnvironmentVariable("ST_TRAY_THEME");
         if (string.Equals(forced, "dark", StringComparison.OrdinalIgnoreCase)) return true;
         if (string.Equals(forced, "light", StringComparison.OrdinalIgnoreCase)) return false;
@@ -191,6 +208,7 @@ internal static class Typography
     public static readonly Font Button = new(Family, 9.5f);
     public static readonly Font ButtonBold = new(Family, 9.5f, FontStyle.Bold);
     public static readonly Font Mono = new(MonoFamilyName, 9f);
+    public static readonly Font MonoBold = new(MonoFamilyName, 9f, FontStyle.Bold);
 
     private static readonly Dictionary<int, Font> IconFonts = new();
 

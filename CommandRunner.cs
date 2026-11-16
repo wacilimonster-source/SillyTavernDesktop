@@ -96,12 +96,12 @@ internal static class CommandRunner
         return RunNpmAsync(npm, directory, args, onOutput, production: true, environment, timeout: TimeSpan.FromMinutes(30));
     }
 
-    public static Task<CommandResult> GetNpmRegistryAsync(string npm, string directory) =>
+    public static Task<CommandResult> GetNpmRegistryAsync(string npm, string directory, CancellationToken cancellation = default) =>
         RunNpmAsync(npm, directory, "config get registry", null, production: false, environment: null,
-            timeout: TimeSpan.FromSeconds(30));
+            timeout: TimeSpan.FromSeconds(30), cancellation: cancellation);
 
     private static Task<CommandResult> RunNpmAsync(string npm, string directory, string arguments, Action<string>? onOutput,
-        bool production, IReadOnlyDictionary<string, string>? environment, TimeSpan? timeout = null)
+        bool production, IReadOnlyDictionary<string, string>? environment, TimeSpan? timeout = null, CancellationToken cancellation = default)
     {
         // The arguments are fixed by this program. The path is expanded once from an environment variable by cmd.exe.
         var command = $"/d /s /c \"\"%ST_TRAY_NPM_PATH%\" {arguments}\"";
@@ -110,6 +110,6 @@ internal static class CommandRunner
             : new Dictionary<string, string>(environment, StringComparer.OrdinalIgnoreCase);
         childEnvironment["ST_TRAY_NPM_PATH"] = npm;
         return RunAsync(Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe", [], directory, onOutput, production: production,
-            rawArguments: command, environment: childEnvironment, timeout: timeout);
+            rawArguments: command, environment: childEnvironment, cancellation: cancellation, timeout: timeout);
     }
 }

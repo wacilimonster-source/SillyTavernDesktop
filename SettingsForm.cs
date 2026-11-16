@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using SillyTavernTray.Ui;
 using SillyTavernTray.Ui.Controls;
 
@@ -15,6 +16,7 @@ internal sealed class SettingsForm : ThemedForm
     private readonly TextField directory = new();
     private readonly ThemedLabel errorLabel = new() { Tone = LabelTone.Danger, AutoSize = false, Visible = false };
     private readonly ThemedLabel hintLabel = new() { Tone = LabelTone.Tertiary, AutoSize = false };
+    private readonly SegmentedControl appearance = new();
     private readonly ToggleSwitch login = new();
     private readonly ToggleSwitch start = new();
     private readonly ToggleSwitch browser = new();
@@ -24,7 +26,10 @@ internal sealed class SettingsForm : ThemedForm
     private readonly ThemedLabel updateStatus = new() { Tone = LabelTone.Secondary, AutoSize = false, Visible = false };
     private readonly ThemedButton checkManagerUpdate = new();
     private readonly ThemedButton saveButton = new();
+    private readonly ThemedButton crashDirectoryButton = new();
+    private readonly ThemedLabel crashLabel = new() { Tone = LabelTone.Secondary, AutoSize = false };
     private readonly List<Panel> dividers = new();
+    private int contentHeight;
 
     static SettingsForm() { Theme.Initialize(); }
 
@@ -34,6 +39,7 @@ internal sealed class SettingsForm : ThemedForm
         this.settings = settings;
         this.serviceRunning = serviceRunning;
         this.isServiceRunning = isServiceRunning;
+        Theme.ApplyAppearance(settings.Appearance);
         Theme.Initialize();
         Text = "设置";
         Font = Typography.Body;
@@ -44,9 +50,10 @@ internal sealed class SettingsForm : ThemedForm
         _ = Handle;
         var scale = Math.Max(1f, DeviceDpi / 96f);
         var area = Screen.FromPoint(Cursor.Position).WorkingArea;
+        // Width first; the height adapts to the content once BuildBody knows it (v2 §6).
         ClientSize = new Size(
             Math.Min((int)Math.Round(560 * scale), Math.Max(S(320), area.Width - S(24))),
-            Math.Min((int)Math.Round(710 * scale), Math.Max(S(320), area.Height - S(24))));
+            Math.Min(S(480), Math.Max(S(320), area.Height - S(24))));
         FormClosed += (_, _) => lifetime.Cancel();
 
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, BackColor = Theme.Current.Background };
@@ -82,6 +89,9 @@ internal sealed class SettingsForm : ThemedForm
         CancelButton = cancel;
 
         BuildBody();
+        // Content-adaptive height with the screen work area as ceiling (v2 §6, T12).
+        var desired = (int)Math.Round((40 + 12 + contentHeight + 8 + 52 + 26) * scale);
+        ClientSize = new Size(ClientSize.Width, Math.Clamp(desired, Math.Min(S(420), Math.Max(S(320), area.Height - S(24))), Math.Max(S(320), area.Height - S(24))));
         ApplyTheme();
     }
 
@@ -91,6 +101,34 @@ internal sealed class SettingsForm : ThemedForm
     {
         var width = Math.Max(S(300), ClientSize.Width - S(44));
         var y = S(6);
+
+        var appearanceTitle = SectionTitle("外观");
+        appearanceTitle.Location = new Point(0, y);
+        appearanceTitle.Width = width;
+        body.Controls.Add(appearanceTitle);
+        y += S(26);
+
+        appearance.Items = ["跟随系统", "浅色", "深色"];
+        appearance.SelectedIndex = Math.Clamp(settings.Appearance, 0, 2);
+        appearance.AccessibleName = "界面外观";
+        appearance.Width = appearance.MeasureWidth();
+        appearance.Location = new Point(0, y);
+        body.Controls.Add(appearance);
+        y += S(32);
+
+        var appearanceHint = new ThemedLabel
+        {
+            Text = "固定浅色或深色后，不再跟随系统切换。",
+            Tone = LabelTone.Tertiary,
+            AutoSize = false,
+            Location = new Point(0, y),
+            Size = new Size(width, S(18))
+        };
+        body.Controls.Add(appearanceHint);
+        y += S(24);
+
+        y = AddDivider(y);
+        y += S(10);
 
         var installTitle = SectionTitle("安装位置");
         installTitle.Location = new Point(0, y);
@@ -203,7 +241,31 @@ internal sealed class SettingsForm : ThemedForm
             Size = new Size(width, S(36))
         };
         body.Controls.Add(about);
-        body.AutoScrollMinSize = new Size(0, y + S(52));
+        y += S(42);
+
+        // Crash report visibility gives failed launches somewhere to go (v2 §6).
+        crashLabel.Text = Diagnostics.CrashReportCount > 0 ? $"崩溃报告：{Diagnostics.CrashReportCount} 份" : "无崩溃记录";
+        crashLabel.SetBounds(0, y + S(5), width - S(100), S(22));
+        body.Controls.Add(crashLabel);
+        crashDirectoryButton.Text = "打开目录";
+        crashDirectoryButton.Variant = ButtonVariant.Secondary;
+        crashDirectoryButton.PreferredHeight = 28;
+        crashDirectoryButton.AutoSize = false;
+        crashDirectoryButton.Size = new Size(S(94), S(28));
+        crashDirectoryButton.Location = new Point(width - S(94), y);
+        crashDirectoryButton.AccessibleName = "打开数据目录";
+        crashDirectoryButton.Click += (_, _) => OpenPath(AppSettings.DataDirectory);
+        body.Controls.Add(crashDirectoryButton);
+        y += S(36);
+
+        contentHeight = y + S(24);
+        body.AutoScrollMinSize = new Size(0, contentHeight);
+    }
+
+    private void OpenPath(string path)
+    {
+        try { Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }); }
+        catch (Exception ex) { ShowError("无法打开：" + ex.Message); }
     }
 
     private ThemedLabel SectionTitle(string text) => new()
@@ -320,7 +382,8 @@ internal sealed class SettingsForm : ThemedForm
                 StartServerOnLaunch = start.Checked,
                 OpenBrowserOnAutostart = browser.Checked,
                 AutoUpdateManager = autoUpdate.Checked,
-                AutoRestartServer = watchdog.Checked
+                AutoRestartServer = watchdog.Checked,
+                Appearance = appearance.SelectedIndex
             };
             var previousAutostart = ReadAutoStart();
             candidate.Save();
@@ -336,6 +399,7 @@ internal sealed class SettingsForm : ThemedForm
             settings.OpenBrowserOnAutostart = candidate.OpenBrowserOnAutostart;
             settings.AutoUpdateManager = candidate.AutoUpdateManager;
             settings.AutoRestartServer = candidate.AutoRestartServer;
+            settings.Appearance = candidate.Appearance;
             DialogResult = DialogResult.OK;
             Close();
         }

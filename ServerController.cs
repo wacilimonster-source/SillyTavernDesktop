@@ -1,6 +1,8 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Net.NetworkInformation;
+using System.Runtime.InteropServices;
 
 namespace SillyTavernTray;
 
@@ -18,6 +20,8 @@ internal sealed class ServerController
     private bool expectedExit;
     private ServerState state = ServerState.Stopped;
     private string detail = "未运行";
+    private int stopWaitedSeconds;
+    private int? lastExitCode;
     public InstanceConfig? Config { get; private set; }
     public event Action? Changed;
     /// <summary>State-independent observations (slow startup) that deserve a tray balloon.</summary>
@@ -27,6 +31,10 @@ internal sealed class ServerController
     public ServerState State { get { lock (sync) return state; } }
     public string Detail { get { lock (sync) return detail; } }
     public bool HasOwnedProcess { get { lock (sync) return child is { HasExited: false }; } }
+    /// <summary>Seconds elapsed since the current stop request started; 0 while not stopping.</summary>
+    public int StopWaitedSeconds { get { lock (sync) return stopWaitedSeconds; } }
+    /// <summary>Exit code of the last unexpected service exit, for the diagnostics view.</summary>
+    public int? LastExitCode { get { lock (sync) return lastExitCode; } }
     public string? HeartbeatPath => Config is null ? null : Path.Combine(Config.DataRoot, "heartbeat.json");
 
     private void SetState(ServerState next, string message)
@@ -85,6 +93,64 @@ internal sealed class ServerController
     {
         try { return IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners().Any(endpoint => endpoint.Port == port); }
         catch (NetworkInformationException) { throw new InvalidOperationException("无法检查端口状态，请先排查网络环境。"); }
+    }
+
+    /// <summary>
+    /// Read-only lookup of the process listening on the port, via the Windows TCP table.
+    /// Returns null when the table cannot be read or the process has already exited;
+    /// the manager never acts on the process, the answer is display-only.
+    /// </summary>
+    public static (int ProcessId, string Name)? FindPortOwner(int port)
+    {
+        try
+        {
+            foreach (var pid in EnumerateListenerPids(port))
+            {
+                try
+                {
+                    using var process = Process.GetProcessById(pid);
+                    return (pid, process.ProcessName + ".exe");
+                }
+                catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+                {
+                    return (pid, "未知进程");
+                }
+            }
+        }
+        catch (DllNotFoundException) { }
+        catch (EntryPointNotFoundException) { }
+        return null;
+    }
+
+    private const int AfInet = 2;
+    private const int TcpTableOwnerPidListener = 3;
+    private const int TcpRowOwnerPidSize = 24; // DWORD state + 2 sockaddrs (8 B each) + DWORD pid
+
+    [DllImport("iphlpapi.dll", SetLastError = true)]
+    private static extern uint GetExtendedTcpTable(IntPtr tcpTable, ref int size, bool sort, int ipVersion, int tableClass, int reserved);
+
+    private static IEnumerable<int> EnumerateListenerPids(int port)
+    {
+        var size = 0;
+        // First call with a zero buffer returns the required size (ERROR_INSUFFICIENT_BUFFER = 122).
+        _ = GetExtendedTcpTable(IntPtr.Zero, ref size, false, AfInet, TcpTableOwnerPidListener, 0);
+        if (size <= 0) yield break;
+        var buffer = Marshal.AllocHGlobal(size);
+        try
+        {
+            if (GetExtendedTcpTable(buffer, ref size, false, AfInet, TcpTableOwnerPidListener, 0) != 0) yield break;
+            var count = Marshal.ReadInt32(buffer);
+            var rowBase = buffer + 4; // The table header is a single DWORD entry count.
+            for (var i = 0; i < count; i++)
+            {
+                var row = rowBase + i * TcpRowOwnerPidSize;
+                // dwLocalPort is at offset 8 in network byte order (htons).
+                var rawPort = Marshal.ReadInt32(row, 8);
+                var localPort = ((rawPort & 0xFF) << 8) | ((rawPort >> 8) & 0xFF);
+                if (localPort == port) yield return Marshal.ReadInt32(row, 20);
+            }
+        }
+        finally { Marshal.FreeHGlobal(buffer); }
     }
 
     public async Task StartAsync(bool isAutostart = false)
@@ -185,6 +251,8 @@ internal sealed class ServerController
             child = null;
             wasExpected = expectedExit;
             expectedExit = false;
+            stopWaitedSeconds = 0;
+            if (!wasExpected) lastExitCode = code;
         }
         log.Write("管理器", wasExpected ? $"服务已停止（退出码 {code}）。" : $"服务已退出（退出码 {code}）。");
         SetState(wasExpected ? ServerState.Stopped : ServerState.Failed, wasExpected ? "未运行" : $"服务异常退出（退出码 {code}）");
@@ -223,7 +291,7 @@ internal sealed class ServerController
         try
         {
             NativeNodeProcess? process;
-            lock (sync) { process = child; if (process is not null) expectedExit = true; }
+            lock (sync) { process = child; if (process is not null) { expectedExit = true; stopWaitedSeconds = 0; } }
             if (process is null || process.HasExited) return true;
             SetState(ServerState.Stopping, "正在停止服务…");
             log.Write("管理器", "正在请求服务正常退出。");
@@ -234,6 +302,7 @@ internal sealed class ServerController
             catch (Exception ex) { log.Write("管理器", "无法发送正常停止信号：" + ex.Message); }
             while (!await process.WaitForExitAsync(TimeSpan.FromSeconds(8)))
             {
+                lock (sync) stopWaitedSeconds += 8;
                 var decision = await askOnTimeout();
                 if (decision == StopDecision.Cancel)
                 {

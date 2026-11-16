@@ -112,9 +112,9 @@ internal sealed class ConfirmDialog : ThemedForm
         return button;
     }
 
-    public static StopChoice AskStop(IWin32Window owner, string message)
+    public static StopChoice AskStop(IWin32Window owner, string message, string? title = null)
     {
-        using var dialog = new ConfirmDialog("服务尚未退出", message,
+        using var dialog = new ConfirmDialog(title ?? "服务尚未退出", message,
             primary: "继续等待", secondary: "强制结束", cancel: "取消操作");
         dialog.ShowDialog(owner);
         return dialog.Result switch

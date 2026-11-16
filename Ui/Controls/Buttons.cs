@@ -79,7 +79,7 @@ internal class ThemedButton : Control, IButtonControl
                     break;
                 case ButtonVariant.Secondary:
                     fill = hover ? p.SurfaceMuted : p.Surface;
-                    border = hover ? p.BorderStrong : p.Border;
+                    border = hover ? (DangerHover ? p.Danger : p.BorderStrong) : p.Border;
                     textColor = p.TextPrimary;
                     break;
                 default:

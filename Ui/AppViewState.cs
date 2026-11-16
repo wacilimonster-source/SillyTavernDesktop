@@ -3,9 +3,12 @@ namespace SillyTavernTray.Ui;
 internal enum BusyOperation { None, ReadingConfig, Starting, Stopping, Updating, Repairing, CheckingUpdates, Exiting }
 internal enum ConfigurationState { Unconfigured, Pending, Configured, Error }
 internal enum PrimaryActionKind { None, OpenServer, Start, Retry, ChooseDirectory }
-internal enum ViewActionKind { Stop, Restart, OpenServer, OpenSettings, ViewLog }
+internal enum ViewActionKind { Stop, Restart, OpenServer, OpenSettings, ViewLog, CopyDiagnostics }
+internal enum StepStatus { Pending, Active, Done, Failed }
 
 internal sealed record ViewAction(string Label, string Icon, ViewActionKind Kind, bool Danger = false, bool Enabled = true);
+
+internal sealed record StepState(string Label, StepStatus Status);
 
 internal sealed record AppViewState(
     StatusTone Tone,
@@ -19,17 +22,23 @@ internal sealed record AppViewState(
     string ProgressLabel,
     IReadOnlyList<ViewAction> Actions,
     bool AddressEnabled,
-    bool OnboardingVisible);
+    bool OnboardingVisible,
+    IReadOnlyList<StepState>? Steps = null,
+    bool CanCancelStep = false);
 
 internal static class AppStateFactory
 {
+    private static readonly ViewAction CopyDiagnosticsAction = new("复制诊断", Icons.Copy, ViewActionKind.CopyDiagnostics);
+
     public static AppViewState Compute(
         ServerState server,
         bool hasOwnedProcess,
         BusyOperation busy,
         ConfigurationState configuration,
         string detail,
-        string metadata)
+        string metadata,
+        IReadOnlyList<StepState>? steps = null,
+        bool canCancelStep = false)
     {
         if (busy != BusyOperation.None)
         {
@@ -44,9 +53,10 @@ internal static class AppStateFactory
                 BusyOperation.Exiting => "正在退出…",
                 _ => "正在处理…"
             };
+            var operationSteps = busy is BusyOperation.Updating or BusyOperation.Repairing ? steps : null;
             return new AppViewState(StatusTone.Busy, title, metadata, null,
                 PrimaryActionKind.None, "", "", true, title,
-                Array.Empty<ViewAction>(), false, false);
+                Array.Empty<ViewAction>(), false, false, operationSteps, canCancelStep);
         }
 
         if (configuration == ConfigurationState.Unconfigured)
@@ -58,17 +68,20 @@ internal static class AppStateFactory
             return new AppViewState(StatusTone.Error, "配置读取失败", metadata, detail,
                 PrimaryActionKind.Retry, "重新读取", Icons.Restart, false, "",
                 [new ViewAction("打开设置", Icons.Settings, ViewActionKind.OpenSettings),
-                 new ViewAction("查看日志", Icons.History, ViewActionKind.ViewLog)], false, false);
+                 new ViewAction("查看日志", Icons.History, ViewActionKind.ViewLog),
+                 CopyDiagnosticsAction], false, false);
 
         if (server == ServerState.Occupied)
             return new AppViewState(StatusTone.Error, "端口被占用", metadata, detail,
                 PrimaryActionKind.Retry, "重新检测", Icons.Restart, false, "",
-                [new ViewAction("查看日志", Icons.History, ViewActionKind.ViewLog)], false, false);
+                [new ViewAction("查看日志", Icons.History, ViewActionKind.ViewLog),
+                 CopyDiagnosticsAction], false, false);
 
         if (server == ServerState.Failed)
             return new AppViewState(StatusTone.Error, "服务异常退出", metadata, detail,
                 PrimaryActionKind.Start, "启动服务", Icons.Play, false, "",
-                [new ViewAction("查看日志", Icons.History, ViewActionKind.ViewLog)], false, false);
+                [new ViewAction("查看日志", Icons.History, ViewActionKind.ViewLog),
+                 CopyDiagnosticsAction], false, false);
 
         if (server == ServerState.Starting)
             return new AppViewState(StatusTone.Busy, detail, metadata, null,

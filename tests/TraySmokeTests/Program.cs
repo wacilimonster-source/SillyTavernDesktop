@@ -126,7 +126,12 @@ internal static class TestProgram
 
             var check = await maintenance.CheckUpdatesAsync();
             Assert(check.Contains("发现更新"), "update availability detection");
+            var stepEvents = new List<(int Index, StepStatus Status)>();
+            maintenance.StepChanged += (index, status, _) => stepEvents.Add((index, status));
             await maintenance.UpdateAsync(() => Task.FromResult(StopDecision.Cancel));
+            Assert(stepEvents.Count >= 10 && stepEvents[0] == (0, StepStatus.Active), "update reports preflight activation");
+            Assert(stepEvents.Contains((4, StepStatus.Active)) && stepEvents.Last() == (4, StepStatus.Done), "update walks all five steps to restart");
+            Assert(!stepEvents.Any(e => e.Status == StepStatus.Failed), "successful update has no failed step");
             await WaitUntil(() => server.State == ServerState.Running && server.Config?.Version == "1.0.1", "updated server ready");
             Assert(File.ReadAllText(Path.Combine(temp, "stopped.txt")) == "graceful", "SIGINT graceful shutdown handler");
             Console.WriteLine("PASS: fetch, official pull, dependency command, graceful stop and restart");
@@ -145,7 +150,9 @@ internal static class TestProgram
             Assert(server.State == ServerState.Occupied && !server.HasOwnedProcess, "occupied port protection");
             using var connection = new TcpClient();
             await connection.ConnectAsync(IPAddress.Loopback, occupied);
-            Console.WriteLine("PASS: occupied port is reported and external listener remains alive");
+            var owner = ServerController.FindPortOwner(occupied);
+            Assert(owner is { } found && found.ProcessId == Environment.ProcessId, $"occupied port resolves to the owning PID (got {owner?.ProcessId})");
+            Console.WriteLine("PASS: occupied port is reported with its owning process and external listener remains alive");
 
             Assert(log.ReadRecent().Any(x => x.Contains("normal shutdown")), "service output captured to history");
             Console.WriteLine("PASS: service output persisted in history");
@@ -338,17 +345,28 @@ internal static class TestProgram
         Assert(stopped.Tone == StatusTone.Stopped && stopped.PrimaryKind == PrimaryActionKind.Start, "stopped primary state");
         Assert(stopped.Actions.Count == 1 && !stopped.Actions[0].Enabled, "stopped open action disabled");
 
-        var busy = AppStateFactory.Compute(ServerState.Starting, false, BusyOperation.Starting, ConfigurationState.Configured, "正在启动", "meta");
+        var steps = new List<StepState> { new("预检", StepStatus.Done), new("停止服务", StepStatus.Active), new("拉取更新", StepStatus.Pending) };
+        var busy = AppStateFactory.Compute(ServerState.Starting, false, BusyOperation.Updating, ConfigurationState.Configured, "正在更新", "meta", steps, canCancelStep: false);
         Assert(busy.Tone == StatusTone.Busy && busy.ShowProgress && busy.PrimaryKind == PrimaryActionKind.None, "busy progress state");
+        Assert(busy.Steps is { Count: 3 } && busy.Steps[1].Status == StepStatus.Active, "busy step bar follows maintenance steps");
+        var busyStart = AppStateFactory.Compute(ServerState.Starting, false, BusyOperation.Starting, ConfigurationState.Configured, "正在启动", "meta", steps, canCancelStep: true);
+        Assert(busyStart.Steps is null, "steps only appear for maintenance operations");
 
         var occupied = AppStateFactory.Compute(ServerState.Occupied, false, BusyOperation.None, ConfigurationState.Configured, "端口 8000 已被占用", "meta");
         Assert(occupied.Tone == StatusTone.Error && occupied.PrimaryKind == PrimaryActionKind.Retry, "occupied retry state");
+        Assert(occupied.Actions.Any(a => a.Kind == ViewActionKind.CopyDiagnostics), "occupied offers copy diagnostics");
+
+        var failed = AppStateFactory.Compute(ServerState.Failed, false, BusyOperation.None, ConfigurationState.Configured, "服务异常退出（退出码 1）", "meta");
+        Assert(failed.Actions.Any(a => a.Kind == ViewActionKind.CopyDiagnostics), "failed offers copy diagnostics");
+        Assert(AppStateFactory.Compute(ServerState.Stopped, false, BusyOperation.None, ConfigurationState.Configured, "未运行", "meta")
+            .Actions.All(a => a.Kind != ViewActionKind.CopyDiagnostics), "healthy states do not offer copy diagnostics");
 
         var unconfigured = AppStateFactory.Compute(ServerState.Stopped, false, BusyOperation.None, ConfigurationState.Unconfigured, "未运行", "meta");
         Assert(unconfigured.OnboardingVisible && unconfigured.PrimaryKind == PrimaryActionKind.ChooseDirectory, "unconfigured onboarding state");
 
         var configError = AppStateFactory.Compute(ServerState.Stopped, false, BusyOperation.None, ConfigurationState.Error, "读取失败", "meta");
         Assert(configError.Tone == StatusTone.Error && configError.PrimaryKind == PrimaryActionKind.Retry, "configuration error state");
+        Assert(configError.Actions.Any(a => a.Kind == ViewActionKind.CopyDiagnostics), "configuration error offers copy diagnostics");
 
         Console.WriteLine("PASS: view state mapping covers running, stopped, busy, occupied, unconfigured and error");
     }

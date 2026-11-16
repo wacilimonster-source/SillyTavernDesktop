@@ -246,12 +246,20 @@ internal sealed class SearchBox : RoundedPanel
         input.KeyDown += (_, e) =>
         {
             if (e.KeyCode == Keys.Escape) { input.Clear(); e.SuppressKeyPress = true; }
+            else if (e.KeyCode == Keys.Enter)
+            {
+                // Enter walks the matches; Shift+Enter walks backwards (v2 §4.7).
+                e.SuppressKeyPress = true;
+                NavigateRequested?.Invoke(!e.Shift);
+            }
         };
         clear.Click += (_, _) => { input.Clear(); input.Focus(); };
         clear.Backdrop = Theme.Current.Surface;
         Theme.Changed += ApplyTheme;
         ApplyTheme();
     }
+
+    public event Action<bool>? NavigateRequested;
 
     [AllowNull]
     public override string Text

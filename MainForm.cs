@@ -7,6 +7,7 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Windows.Forms.Automation;
 using SillyTavernTray.Ui;
 using SillyTavernTray.Ui.Controls;
 using SillyTavernTray.Ui.Dialogs;
@@ -31,6 +32,7 @@ internal sealed class MainForm : ThemedForm
     private readonly ToolStripMenuItem trayUpdate = new("检查 ST 更新");
     private readonly ToolStripMenuItem trayManagerUpdate = new("检查管理器更新");
     private readonly ToolStripMenuItem trayRepair = new("依赖修复");
+    private readonly ToolStripMenuItem trayDiagnostics = new("复制诊断");
     private readonly ToolStripMenuItem traySettings = new("设置");
     private readonly ToolStripMenuItem trayExit = new("退出（并停止服务）");
     private readonly Dictionary<ToolStripMenuItem, string> trayGlyphs = new();
@@ -43,6 +45,7 @@ internal sealed class MainForm : ThemedForm
     private readonly Panel footer;
 
     private readonly RoundedPanel statusCard;
+    private TableLayoutPanel statusGrid = null!;
     private StatusDot statusDot = null!;
     private ThemedLabel statusLabel = null!;
     private ThemedLabel metaLabel = null!;
@@ -73,10 +76,36 @@ internal sealed class MainForm : ThemedForm
     private readonly SearchBox logSearch = new();
     private ThemedIconButton pauseButton = null!;
     private ThemedIconButton copyLogButton = null!;
+    private ThemedIconButton copyDiagButton = null!;
+    private ThemedIconButton searchToggleButton = null!;
     private ThemedIconButton openLogButton = null!;
     private readonly LogRichTextBox logView = new();
     private ThemedButton backToBottom = null!;
     private RoundedPanel logSurface = null!;
+    private SearchPopup? searchPopup;
+    private readonly List<(int Offset, int Length)> searchMatches = [];
+    private int searchMatchIndex = -1;
+    private readonly List<(string Source, bool IsSeparator)> renderedEntries = [];
+    private string? lastRenderedDate;
+    private bool compactMode;
+
+    private readonly StepProgress stepProgress = new();
+    private readonly FlowLayoutPanel cancelFlow = new();
+    private readonly ThemedButton cancelMaintenanceButton = new();
+    private readonly ThemedLabel cancelHintLabel = new() { Tone = LabelTone.Tertiary, AutoSize = true };
+    private readonly ThemedLabel elapsedLabel = new() { Tone = LabelTone.Tertiary, AutoSize = true };
+    private readonly ThemedLabel watchdogBadge = new() { Tone = LabelTone.Success, AutoSize = true, Visible = false, BackColor = Color.Transparent };
+    private readonly System.Windows.Forms.Timer busyTimer = new() { Interval = 1000 };
+    private DateTime busySinceUtc = DateTime.MinValue;
+    private List<StepState> currentSteps = [];
+    private int currentStepIndex;
+    private CancellationTokenSource? maintenanceCancel;
+    private int watchdogRestartCount;
+    private DateTime? lastWatchdogRestartAt;
+    private TimeSpan? lastRunDuration;
+    private (string Kind, DateTime Time)? lastMaintenance;
+    private (int ProcessId, string Name)? occupierInfo;
+    private DateTime occupierQueriedUtc = DateTime.MinValue;
 
     private readonly RoundedPanel onboarding;
     private RowStyle? logRow;
@@ -124,6 +153,7 @@ internal sealed class MainForm : ThemedForm
         this.showSignal = showSignal;
         Theme.Initialize();
         settings = AppSettings.Load();
+        Theme.ApplyAppearance(settings.Appearance);
         if (AppSettings.RecoveryNotice is { } recovery) log.Write("管理器", recovery);
         server = new ServerController(settings, log);
         maintenance = new MaintenanceService(settings, log, server);
@@ -240,13 +270,19 @@ internal sealed class MainForm : ThemedForm
         server.Changed += OnServerChanged;
         server.Notice += message => TryUi(() => Notify("SillyTavern 启动缓慢", message));
         PendingManagerUpdateStore.Changed += OnPendingUpdateStoreChanged;
+        maintenance.StepChanged += (index, status, _) => TryUi(() => OnStepChanged(index, status));
         logTimer.Tick += (_, _) => FlushLogQueue();
         logTimer.Start();
+        busyTimer.Tick += (_, _) => UpdateBusyElapsed();
+        busyTimer.Start();
         watchdogTimer.Tick += (_, _) => CheckWatchdog();
         watchdogTimer.Start();
         managerUpdateTimer.Tick += async (_, _) => await CheckManagerUpdateAsync(manual: false);
         RebuildLog();
         UpdateDisplay();
+        // The status title doubles as the screen-reader live region (v2 §8).
+        statusLabel.LiveSetting = AutomationLiveSetting.Polite;
+        progressLabel.LiveSetting = AutomationLiveSetting.Polite;
 
         Shown += async (_, _) =>
         {
@@ -261,7 +297,7 @@ internal sealed class MainForm : ThemedForm
                 catch (OperationCanceledException) { }
             }
         };
-        Resize += (_, _) => { PositionToast(); if (WindowState == FormWindowState.Minimized) HideToTray(); };
+        Resize += (_, _) => { PositionToast(); UpdateCompactMode(); if (WindowState == FormWindowState.Minimized) HideToTray(); };
         _ = Task.Run(() =>
         {
             // Polling with a timeout keeps this thread from sitting in an unbreakable wait that
@@ -292,12 +328,16 @@ internal sealed class MainForm : ThemedForm
             Margin = new Padding(0, 0, 0, S(12))
         };
 
-        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3, BackColor = Color.Transparent };
+        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 6, BackColor = Color.Transparent };
+        statusGrid = grid;
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         grid.RowStyles.Add(new RowStyle(SizeType.Absolute, S(30)));
         grid.RowStyles.Add(new RowStyle(SizeType.Absolute, S(20)));
         grid.RowStyles.Add(new RowStyle(SizeType.Absolute, S(34)));
+        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));
+        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));
+        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));
 
         var head = new FlowLayoutPanel { AutoSize = true, WrapContents = false, BackColor = Color.Transparent, Margin = Fill };
         statusDot = new StatusDot { Margin = new Padding(0, S(5), S(8), 0), BackColor = Color.Transparent };
@@ -305,6 +345,10 @@ internal sealed class MainForm : ThemedForm
         head.Controls.Add(statusDot);
         head.Controls.Add(statusLabel);
 
+        // Meta row: primary metadata (ellipsis) + optional watchdog badge (v2 §4.1).
+        var metaRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = Color.Transparent, Margin = Fill };
+        metaRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        metaRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         metaLabel = new ThemedLabel
         {
             AutoSize = false,
@@ -315,6 +359,9 @@ internal sealed class MainForm : ThemedForm
             AutoEllipsis = true,
             Margin = Fill
         };
+        watchdogBadge.Margin = new Padding(S(6), S(3), 0, 0);
+        metaRow.Controls.Add(metaLabel, 0, 0);
+        metaRow.Controls.Add(watchdogBadge, 1, 0);
 
         statusActions.Dock = DockStyle.Fill;
         statusActions.FlowDirection = FlowDirection.LeftToRight;
@@ -333,21 +380,41 @@ internal sealed class MainForm : ThemedForm
         progressFlow.WrapContents = false;
         progressFlow.BackColor = Color.Transparent;
         progressFlow.Margin = Fill;
-        progressFlow.Anchor = AnchorStyles.Right;
+        progressFlow.Anchor = AnchorStyles.Left;
         progressFlow.Visible = false;
         spinner.Margin = new Padding(0, S(8), S(8), 0);
         progressLabel.AutoSize = true;
-        progressLabel.Margin = new Padding(0, S(7), 0, 0);
+        progressLabel.Margin = new Padding(0, S(7), S(6), 0);
+        elapsedLabel.AutoSize = true;
+        elapsedLabel.Margin = new Padding(0, S(7), 0, 0);
         progressFlow.Controls.Add(spinner);
         progressFlow.Controls.Add(progressLabel);
+        progressFlow.Controls.Add(elapsedLabel);
+
+        stepProgress.Margin = Fill;
+        cancelFlow.AutoSize = true;
+        cancelFlow.WrapContents = false;
+        cancelFlow.BackColor = Color.Transparent;
+        cancelFlow.Margin = Fill;
+        cancelFlow.Visible = false;
+        cancelMaintenanceButton.Text = "取消";
+        cancelMaintenanceButton.Variant = ButtonVariant.Quiet;
+        cancelMaintenanceButton.PreferredHeight = 24;
+        cancelMaintenanceButton.Font = Typography.Caption;
+        cancelMaintenanceButton.Margin = new Padding(0, 0, S(8), 0);
+        cancelMaintenanceButton.Click += (_, _) => CancelMaintenance();
+        cancelHintLabel.Margin = new Padding(0, S(5), 0, 0);
+        cancelFlow.Controls.Add(cancelMaintenanceButton);
+        cancelFlow.Controls.Add(cancelHintLabel);
 
         grid.Controls.Add(head, 0, 0);
-        grid.Controls.Add(metaLabel, 0, 1);
+        grid.Controls.Add(metaRow, 0, 1);
         grid.Controls.Add(statusActions, 0, 2);
+        grid.Controls.Add(progressFlow, 0, 3);
+        grid.Controls.Add(stepProgress, 0, 4);
+        grid.Controls.Add(cancelFlow, 0, 5);
         grid.Controls.Add(primaryButton, 1, 0);
         grid.SetRowSpan(primaryButton, 3);
-        grid.Controls.Add(progressFlow, 1, 0);
-        grid.SetRowSpan(progressFlow, 3);
         card.Controls.Add(grid);
         return card;
     }
@@ -369,7 +436,7 @@ internal sealed class MainForm : ThemedForm
         {
             Variant = ButtonVariant.Secondary,
             IconGlyph = Icons.Copy,
-            Text = "复制地址",
+            Text = "复制",
             Caption = "",
             PreferredHeight = 40,
             AutoSize = false,
@@ -397,6 +464,10 @@ internal sealed class MainForm : ThemedForm
         checkUpdateButton = MaintenanceButton("检查更新", Icons.Restart, async (_, _) => await CheckUpdatesAsync());
         updateButton = MaintenanceButton("更新 ST", Icons.Download, async (_, _) => await UpdateAsync());
         repairButton = MaintenanceButton("依赖修复", Icons.Repair, async (_, _) => await RepairAsync());
+        updateButton.DangerHover = true;
+        repairButton.DangerHover = true;
+        toolTip.SetToolTip(updateButton, "更新会停止服务并中断正在进行的聊天");
+        toolTip.SetToolTip(repairButton, "依赖修复会停止服务并重新安装生产依赖");
         row.Controls.Add(checkUpdateButton);
         row.Controls.Add(updateButton);
         row.Controls.Add(repairButton);
@@ -432,7 +503,10 @@ internal sealed class MainForm : ThemedForm
         var tools = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, BackColor = Color.Transparent, Margin = Fill };
         openLogButton = LogIcon(Icons.Folder, "打开日志目录", (_, _) => OpenPath(log.DirectoryPath, create: true));
         copyLogButton = LogIcon(Icons.Copy, "复制日志", (_, _) => CopyLog());
+        copyDiagButton = LogIcon(Icons.History, "复制诊断信息（版本、状态、最近日志）", (_, _) => CopyDiagnostics());
         pauseButton = LogIcon(Icons.Pause, "暂停滚动", (_, _) => TogglePause());
+        searchToggleButton = LogIcon(Icons.Search, "搜索日志", (_, _) => OpenSearchPopup());
+        searchToggleButton.Visible = false;
         logSearch.Width = S(140);
         logSearch.Margin = new Padding(0, S(2), S(4), 0);
         logSources.AccessibleName = "日志来源";
@@ -443,9 +517,12 @@ internal sealed class MainForm : ThemedForm
         logSources.SelectedIndexChanged += (_, _) => RebuildLog();
         logSearch.TextChanged += (_, _) => { logSearchTimer.Stop(); logSearchTimer.Start(); };
         logSearchTimer.Tick += (_, _) => { logSearchTimer.Stop(); RebuildLog(); };
+        logSearch.NavigateRequested += forward => NavigateSearch(forward ? 1 : -1);
         tools.Controls.Add(openLogButton);
         tools.Controls.Add(copyLogButton);
+        tools.Controls.Add(copyDiagButton);
         tools.Controls.Add(pauseButton);
+        tools.Controls.Add(searchToggleButton);
         tools.Controls.Add(logSearch);
         tools.Controls.Add(logSources);
         header.Controls.Add(titleFlow, 0, 0);
@@ -514,10 +591,13 @@ internal sealed class MainForm : ThemedForm
         var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, BackColor = Color.Transparent, Margin = Fill };
         var browse = new ThemedButton { Text = "浏览…", Variant = ButtonVariant.Accent, IconGlyph = Icons.Folder, PreferredHeight = 34, Margin = new Padding(0, 0, S(8), 0) };
         browse.Click += async (_, _) => await ChooseInstallDirectoryAsync();
-        var openSettings = new ThemedButton { Text = "打开设置", Variant = ButtonVariant.Quiet, IconGlyph = Icons.Settings, PreferredHeight = 34 };
-        openSettings.Click += (_, _) => ShowSettings();
+        var viewLog = new ThemedButton { Text = "查看日志", Variant = ButtonVariant.Quiet, PreferredHeight = 34, Margin = new Padding(0, 0, S(8), 0) };
+        viewLog.Click += (_, _) => OpenPath(log.DirectoryPath, create: true);
+        var learnMore = new ThemedButton { Text = "了解管理器能做什么", Variant = ButtonVariant.Quiet, PreferredHeight = 34 };
+        learnMore.Click += (_, _) => OpenReadme();
         actions.Controls.Add(browse);
-        actions.Controls.Add(openSettings);
+        actions.Controls.Add(viewLog);
+        actions.Controls.Add(learnMore);
         grid.Controls.Add(heading, 0, 0);
         grid.Controls.Add(description, 0, 1);
         grid.Controls.Add(actions, 0, 4);
@@ -549,23 +629,26 @@ internal sealed class MainForm : ThemedForm
         AddTrayItem(trayStartStop, Icons.Play, async (_, _) => await StartOrStopAsync());
         AddTrayItem(trayRestart, Icons.Restart, async (_, _) => await RestartAsync());
         trayMenu.Items.Add(new ToolStripSeparator());
-        AddTrayItem(trayUpdate, Icons.Restart, async (_, _) => await CheckUpdatesAsync());
+        AddTrayItem(trayUpdate, Icons.Restart, async (_, _) => await CheckUpdatesAsync(), shortcutHint: "F5");
         AddTrayItem(trayManagerUpdate, Icons.Download, async (_, _) => await CheckManagerUpdateAsync(manual: true));
         AddTrayItem(trayRepair, Icons.Repair, async (_, _) => await RepairAsync());
+        AddTrayItem(trayDiagnostics, Icons.History, (_, _) => CopyDiagnostics());
         trayMenu.Items.Add(new ToolStripSeparator());
-        AddTrayItem(traySettings, Icons.Settings, (_, _) => ShowSettings());
+        AddTrayItem(traySettings, Icons.Settings, (_, _) => ShowSettings(), shortcutHint: "Ctrl+,");
         trayMenu.Items.Add(new ToolStripSeparator());
         AddTrayItem(trayExit, Icons.Power, async (_, _) => await ExitAsync(), danger: true);
     }
 
-    private void AddTrayItem(ToolStripMenuItem item, string glyph, EventHandler handler, bool danger = false, bool bold = false)
+    private void AddTrayItem(ToolStripMenuItem item, string glyph, EventHandler handler, bool danger = false, bool bold = false, string? shortcutHint = null)
     {
         item.AutoSize = false;
         item.Width = S(248);
         item.Height = S(32);
         item.Padding = Padding.Empty;
         item.Font = bold ? Typography.ButtonBold : Typography.Body;
-        item.Tag = danger ? "danger" : null;
+        item.ShowShortcutKeys = false;
+        item.ShortcutKeyDisplayString = shortcutHint;
+        item.Tag = (danger ? "danger" : null, shortcutHint);
         item.Image = Icons.ToBitmap(glyph, S(16), danger ? Theme.Current.DangerText : Theme.Current.TextSecondary);
         item.ImageScaling = ToolStripItemImageScaling.None;
         item.Click += handler;
@@ -619,16 +702,26 @@ internal sealed class MainForm : ThemedForm
     {
         if (busyOperation != BusyOperation.None || reallyClosing) return;
         busyOperation = operation;
+        busySinceUtc = DateTime.UtcNow;
+        if (operation is BusyOperation.Updating or BusyOperation.Repairing) maintenanceCancel = new CancellationTokenSource();
         UpdateDisplay();
         try
         {
             await action();
             if (operation == BusyOperation.ReadingConfig) configReadFailed = false;
+            if (operation is BusyOperation.Updating or BusyOperation.Repairing)
+                lastMaintenance = (operation == BusyOperation.Updating ? "更新完成" : "依赖修复完成", DateTime.Now);
         }
         catch (OperationCanceledException ex)
         {
-            log.Write("管理器", ex.Message);
-            if (showErrors) ShowToast(ex.Message, ToastKind.Info);
+            // A cancel raised by the maintenance cancel button gets a friendly toast;
+            // other cancels (stop declined, watchdog) keep their specific message.
+            var userCancelled = maintenanceCancel is { IsCancellationRequested: true };
+            var message = userCancelled
+                ? operation == BusyOperation.Updating ? "已取消更新" : operation == BusyOperation.Repairing ? "已取消修复" : "操作已取消"
+                : ex.Message;
+            log.Write("管理器", message);
+            if (showErrors) ShowToast(message, ToastKind.Info);
         }
         catch (Exception ex)
         {
@@ -640,6 +733,10 @@ internal sealed class MainForm : ThemedForm
         finally
         {
             busyOperation = BusyOperation.None;
+            currentSteps = [];
+            currentStepIndex = 0;
+            maintenanceCancel?.Dispose();
+            maintenanceCancel = null;
             if (!IsDisposed) UpdateDisplay();
         }
     }
@@ -648,6 +745,7 @@ internal sealed class MainForm : ThemedForm
         server.HasOwnedProcess ? BusyOperation.Stopping : BusyOperation.Starting,
         async () =>
         {
+            ClearWatchdogBadge();
             if (server.HasOwnedProcess) await server.StopAsync(AskStopDecisionAsync);
             else
             {
@@ -659,6 +757,7 @@ internal sealed class MainForm : ThemedForm
 
     private async Task RestartAsync()
     {
+        ClearWatchdogBadge();
         if (server.HasOwnedProcess)
         {
             var stopped = false;
@@ -721,7 +820,8 @@ internal sealed class MainForm : ThemedForm
             StartServerOnLaunch = settings.StartServerOnLaunch,
             OpenBrowserOnAutostart = settings.OpenBrowserOnAutostart,
             AutoUpdateManager = settings.AutoUpdateManager,
-            AutoRestartServer = settings.AutoRestartServer
+            AutoRestartServer = settings.AutoRestartServer,
+            Appearance = settings.Appearance
         };
         try { candidate.Save(); }
         catch (Exception ex) { ShowToast("无法保存设置：" + ex.Message, ToastKind.Error); return; }
@@ -764,10 +864,22 @@ internal sealed class MainForm : ThemedForm
     private async Task UpdateAsync()
     {
         if (!ConfirmDialog.AskConfirm(this, "更新 SillyTavern",
-            "更新会停止服务并可能中断正在进行的聊天。\n将使用官方 Git 和 npm 命令。", "开始更新")) return;
+            "更新将按官方命令依次执行：\n" +
+            "1. 预检 Git 状态与上游\n" +
+            "2. 停止由管理器启动的服务\n" +
+            "3. git pull --rebase --autostash\n" +
+            "4. npm install（生产依赖）\n" +
+            "5. 重新启动服务\n\n" +
+            "正在进行的聊天可能中断；本地未提交修改会阻止更新。", "开始更新")) return;
+        ClearWatchdogBadge();
+        currentSteps =
+        [
+            new("预检", StepStatus.Pending), new("停止服务", StepStatus.Pending), new("拉取更新", StepStatus.Pending),
+            new("安装依赖", StepStatus.Pending), new("重启服务", StepStatus.Pending)
+        ];
         await RunExclusiveAsync(BusyOperation.Updating, async () =>
         {
-            await maintenance.UpdateAsync(AskStopDecisionAsync);
+            await maintenance.UpdateAsync(AskStopDecisionAsync, maintenanceCancel?.Token ?? default);
             branch = await maintenance.GetBranchAsync();
         });
     }
@@ -775,13 +887,27 @@ internal sealed class MainForm : ThemedForm
     private async Task RepairAsync()
     {
         if (!ConfirmDialog.AskConfirm(this, "安装依赖",
-            "依赖修复会停止服务，并运行官方 npm install 命令。", "开始修复")) return;
-        await RunExclusiveAsync(BusyOperation.Repairing, () => maintenance.RepairAsync(AskStopDecisionAsync));
+            "依赖修复将按官方命令依次执行：\n" +
+            "1. 预检 Node.js 与 npm\n" +
+            "2. 停止由管理器启动的服务\n" +
+            "3. npm install（生产依赖）\n" +
+            "4. 重新启动服务\n\n" +
+            "正在进行的聊天可能中断。", "开始修复")) return;
+        ClearWatchdogBadge();
+        currentSteps =
+        [
+            new("预检", StepStatus.Pending), new("停止服务", StepStatus.Pending),
+            new("安装依赖", StepStatus.Pending), new("重启服务", StepStatus.Pending)
+        ];
+        await RunExclusiveAsync(BusyOperation.Repairing, () => maintenance.RepairAsync(AskStopDecisionAsync, maintenanceCancel?.Token ?? default));
     }
 
     private Task<StopDecision> AskStopDecisionAsync()
     {
-        var choice = ConfirmDialog.AskStop(this, "SillyTavern 没有在限定时间内退出。\n强制结束可能中断尚未完成的操作。");
+        var waited = server.StopWaitedSeconds;
+        var choice = ConfirmDialog.AskStop(this,
+            "SillyTavern 没有在限定时间内退出。\n强制结束可能中断尚未完成的操作。",
+            waited > 0 ? $"服务尚未退出（已等待 {waited} 秒）" : null);
         return Task.FromResult(choice switch
         {
             StopChoice.Wait => StopDecision.Wait,
@@ -794,8 +920,24 @@ internal sealed class MainForm : ThemedForm
     {
         if (busyOperation != BusyOperation.None)
         {
-            ShowToast("请等待当前操作结束后再退出。", ToastKind.Info);
-            return;
+            // A maintenance preflight can still be cancelled; offer the exit path instead of refusing (v2 §7).
+            var cancellable = busyOperation is BusyOperation.Updating or BusyOperation.Repairing
+                && currentStepIndex == 0
+                && maintenanceCancel is { IsCancellationRequested: false };
+            if (!cancellable)
+            {
+                ShowToast("请等待当前操作结束后再退出。", ToastKind.Info);
+                return;
+            }
+            if (!ConfirmDialog.AskConfirm(this, "退出程序",
+                "将取消当前的维护操作并退出。\n若服务正在运行，退出前会先停止服务。", "取消并退出")) return;
+            maintenanceCancel?.Cancel();
+            for (var i = 0; i < 300 && busyOperation != BusyOperation.None; i++) await Task.Delay(100);
+            if (busyOperation != BusyOperation.None)
+            {
+                ShowToast("当前操作尚未结束，请稍后再退出。", ToastKind.Warning);
+                return;
+            }
         }
         var canClose = false;
         await RunExclusiveAsync(BusyOperation.Exiting, async () =>
@@ -815,6 +957,7 @@ internal sealed class MainForm : ThemedForm
         if (busyOperation != BusyOperation.None) return;
         using var dialog = new SettingsForm(settings, server.HasOwnedProcess, () => server.HasOwnedProcess);
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        Theme.ApplyAppearance(settings.Appearance);
         if (settings.AutoUpdateManager) { managerUpdateTimer.Start(); _ = CheckManagerUpdateAsync(manual: false); }
         else
         {
@@ -843,6 +986,8 @@ internal sealed class MainForm : ThemedForm
         if (current == ServerState.Running) runningSinceUtc = DateTime.UtcNow;
         if (current == ServerState.Failed)
         {
+            if (previous is ServerState.Running or ServerState.Starting && runningSinceUtc is { } since)
+                lastRunDuration = DateTime.UtcNow - since;
             if (watchdogRestarting) { /* the auto-restart flow reports its own outcome */ }
             else if (previous is ServerState.Running or ServerState.Starting && settings.AutoRestartServer && !reallyClosing && busyOperation == BusyOperation.None)
                 BeginWatchdogRestart("检测到服务异常退出", delay: true);
@@ -891,7 +1036,7 @@ internal sealed class MainForm : ThemedForm
         {
             watchdogPausedUntilUtc = now + TimeSpan.FromMinutes(10);
             log.Write("管理器", "看门狗：短时间内重启次数过多，已暂停自动重启 10 分钟。请检查日志或手动启动服务。");
-            Notify("看门狗已暂停", "短时间内重启次数过多，请检查日志或手动启动服务。");
+            Notify("自动重启已暂停", "10 分钟内重启次数过多，请检查日志。");
             return false;
         }
         watchdogRestarting = true;
@@ -928,6 +1073,8 @@ internal sealed class MainForm : ThemedForm
             }, showErrors: false);
             if (server.State is ServerState.Running or ServerState.Starting)
             {
+                watchdogRestartCount++;
+                lastWatchdogRestartAt = DateTime.Now;
                 log.Write("管理器", "看门狗：服务已自动重启。");
                 Notify("SillyTavern 已自动重启", "看门狗检测到异常并恢复了服务。");
             }
@@ -959,16 +1106,70 @@ internal sealed class MainForm : ThemedForm
         return ConfigurationState.Pending;
     }
 
+    private bool WatchdogBadgeActive => lastWatchdogRestartAt is { } at && DateTime.Now - at < TimeSpan.FromMinutes(30);
+
+    private void ClearWatchdogBadge()
+    {
+        if (watchdogRestartCount == 0 && lastWatchdogRestartAt is null) return;
+        watchdogRestartCount = 0;
+        lastWatchdogRestartAt = null;
+    }
+
+    private static string FormatDuration(TimeSpan duration)
+    {
+        if (duration < TimeSpan.Zero) duration = TimeSpan.Zero;
+        if (duration < TimeSpan.FromMinutes(1)) return "刚刚启动";
+        if (duration < TimeSpan.FromHours(1)) return $"{(int)duration.TotalMinutes} 分钟";
+        if (duration < TimeSpan.FromDays(1)) return $"{(int)duration.TotalHours} 小时 {duration.Minutes} 分";
+        return $"{(int)duration.TotalDays} 天 {(int)duration.Hours} 小时";
+    }
+
+    private static string FormatElapsed(TimeSpan elapsed)
+    {
+        var seconds = Math.Max(0, (int)elapsed.TotalSeconds);
+        return seconds < 60 ? $"已等待 {seconds} 秒" : $"已等待 {seconds / 60} 分 {seconds % 60} 秒";
+    }
+
+    private (int ProcessId, string Name)? QueryOccupier(int port)
+    {
+        if (DateTime.UtcNow - occupierQueriedUtc > TimeSpan.FromSeconds(5))
+        {
+            occupierQueriedUtc = DateTime.UtcNow;
+            occupierInfo = ServerController.FindPortOwner(port);
+        }
+        return occupierInfo;
+    }
+
     private void UpdateDisplay()
     {
         if (IsDisposed) return;
         var p = Theme.Current;
         var configuration = CurrentConfiguration();
         var config = server.Config;
-        var metadata = config is not null
-            ? $"管理器 {ManagerVersion.Current} · ST {config.Version} · {branch} · 端口 {config.Port} · 白名单{(config.Whitelist ? "开" : "关")} · 认证{(config.BasicAuth || config.UserAccounts ? "开" : "未开")}"
-            : $"管理器 {ManagerVersion.Current} · 等待读取 ST 配置";
-        var state = AppStateFactory.Compute(server.State, server.HasOwnedProcess, busyOperation, configuration, server.Detail, metadata);
+        var securityWord = config is null ? "" : config.BasicAuth || config.UserAccounts ? "认证开" : config.Whitelist ? "认证未开" : "无访问限制";
+        string metadata;
+        if (config is not null)
+        {
+            metadata = $"ST {config.Version} · 端口 {config.Port} · {branch} · {securityWord}";
+            if (server.State == ServerState.Running && runningSinceUtc is { } since)
+                metadata += " · 已运行 " + FormatDuration(DateTime.UtcNow - since);
+            if (server.State == ServerState.Failed)
+            {
+                if (server.LastExitCode is { } code) metadata += $" · 退出码 {code}";
+                if (lastRunDuration is { } duration) metadata += " · 已运行 " + FormatDuration(duration);
+            }
+            if (server.State == ServerState.Occupied && QueryOccupier(config.Port) is { } owner)
+                metadata += $" · 占用进程 {owner.Name} (PID {owner.ProcessId})";
+        }
+        else metadata = $"管理器 {ManagerVersion.Current} · 等待读取 ST 配置";
+
+        // The occupied note guides the user instead of repeating the meta line (v2 §4.3).
+        var stateDetail = server.State == ServerState.Occupied
+            ? "若为上次异常退出留下的服务，可结束该进程后点「重新检测」。管理器不会结束或接管其他进程。"
+            : server.Detail;
+        var canCancel = maintenanceCancel is { IsCancellationRequested: false } && currentStepIndex == 0;
+        var state = AppStateFactory.Compute(server.State, server.HasOwnedProcess, busyOperation, configuration, stateDetail, metadata,
+            currentSteps, canCancel);
 
         statusCard.FillColor = p.ToneSurface(state.Tone);
         statusCard.BorderColor = state.Tone == StatusTone.Stopped
@@ -981,6 +1182,42 @@ internal sealed class MainForm : ThemedForm
         metaLabel.Tone = state.Note is null ? LabelTone.Secondary
             : state.Tone == StatusTone.Error ? LabelTone.Danger : LabelTone.Warning;
 
+        // Watchdog badge: visible for 30 minutes after an automatic restart or until the next manual action.
+        var showBadge = !state.OnboardingVisible && WatchdogBadgeActive &&
+                        server.State is ServerState.Running or ServerState.Failed && busyOperation == BusyOperation.None;
+        watchdogBadge.Visible = showBadge;
+        if (showBadge)
+        {
+            watchdogBadge.Text = "· 看门狗 " + lastWatchdogRestartAt!.Value.ToString("HH:mm") + " 自动重启";
+            var paused = watchdogPausedUntilUtc > DateTime.UtcNow;
+            toolTip.SetToolTip(watchdogBadge,
+                $"本次会话第 {watchdogRestartCount} 次自动重启；最近 {lastWatchdogRestartAt.Value:HH:mm:ss}。" +
+                (paused ? "连续超限，自动重启已暂停 10 分钟。" : ""));
+        }
+
+        // Status card height follows the busy extras: progress line, step bar and cancel row.
+        var showSteps = state.ShowProgress && state.Steps is { Count: > 0 };
+        var showCancel = state.ShowProgress && busyOperation is BusyOperation.Updating or BusyOperation.Repairing;
+        statusGrid.RowStyles[2].Height = state.ShowProgress ? 0 : S(34);
+        statusGrid.RowStyles[3].Height = state.ShowProgress ? S(26) : 0;
+        statusGrid.RowStyles[4].Height = showSteps ? S(30) : 0;
+        statusGrid.RowStyles[5].Height = showCancel ? S(26) : 0;
+        layout.RowStyles[0].Height = S(124) - (state.ShowProgress ? S(34) : 0)
+            + (state.ShowProgress ? S(26) : 0) + (showSteps ? S(30) : 0) + (showCancel ? S(26) : 0);
+        progressFlow.Visible = state.ShowProgress;
+        statusActions.Visible = !state.ShowProgress;
+        progressLabel.Text = state.ProgressLabel.TrimEnd('…');
+        UpdateBusyElapsed();
+        if (showSteps && state.Steps is { } steps) stepProgress.SetSteps(steps);
+        stepProgress.Visible = showSteps;
+        cancelFlow.Visible = showCancel;
+        if (showCancel)
+        {
+            cancelMaintenanceButton.Enabled = canCancel;
+            cancelHintLabel.Text = canCancel ? "预检阶段可取消" : "此阶段无法安全取消（npm 半安装会损坏 node_modules）";
+            toolTip.SetToolTip(cancelMaintenanceButton, canCancel ? "取消本次维护" : "此阶段无法安全取消（npm 半安装会损坏 node_modules）");
+        }
+
         primaryKind = state.PrimaryKind;
         primaryButton.Backdrop = p.ToneSurface(state.Tone);
         primaryButton.Visible = !state.ShowProgress && state.PrimaryKind != PrimaryActionKind.None;
@@ -991,8 +1228,6 @@ internal sealed class MainForm : ThemedForm
             primaryButton.AccessibleName = state.PrimaryLabel;
             primaryButton.Size = primaryButton.GetPreferredSize(Size.Empty);
         }
-        progressFlow.Visible = state.ShowProgress;
-        progressLabel.Text = state.ProgressLabel;
 
         RebuildStatusActions(state, p);
 
@@ -1067,6 +1302,7 @@ internal sealed class MainForm : ThemedForm
         tray.Text = ("SillyTavern：" + server.Detail)[..Math.Min(63, ("SillyTavern：" + server.Detail).Length)];
         SetTrayIcon(p.ToneColor(state.Tone));
         pauseButton.Glyph = pausedScroll ? Icons.Play : Icons.Pause;
+        UpdateCompactMode();
         PositionBackToBottom();
     }
 
@@ -1107,6 +1343,7 @@ internal sealed class MainForm : ThemedForm
             case ViewActionKind.OpenServer: OpenServer(); break;
             case ViewActionKind.OpenSettings: ShowSettings(); break;
             case ViewActionKind.ViewLog: RestoreWindow(); ResumeScroll(); break;
+            case ViewActionKind.CopyDiagnostics: CopyDiagnostics(); break;
         }
     }
 
@@ -1218,16 +1455,231 @@ internal sealed class MainForm : ThemedForm
 
     private async void CopyLog()
     {
-        var value = logView.SelectionLength > 0 ? logView.SelectedText : logView.Text;
-        if (string.IsNullOrEmpty(value)) return;
-        try { Clipboard.SetText(value); } catch (ExternalException) { return; }
-        var original = copyLogButton.Glyph;
-        copyLogButton.Glyph = Icons.Check;
-        copyLogButton.Invalidate();
+        if (logView.SelectionLength > 0)
+        {
+            var value = SelectedLogText();
+            if (string.IsNullOrEmpty(value)) return;
+            try { Clipboard.SetText(value); } catch (ExternalException) { return; }
+            await FlashCheck(copyLogButton);
+            return;
+        }
+        // No selection: copy every currently visible line with full timestamps (v2 §4.7).
+        var lines = renderedEntries.Where(entry => !entry.IsSeparator).Select(entry => entry.Source).ToList();        if (lines.Count == 0) return;
+        try { Clipboard.SetText(string.Join("\r\n", lines)); } catch (ExternalException) { return; }
+        ShowToast($"已复制 {lines.Count} 行日志（含完整时间戳）", ToastKind.Success);
+        await FlashCheck(copyLogButton);
+    }
+
+    private async void CopyDiagnostics()
+    {
+        var config = server.Config;
+        var state = server.State;
+        string stateLine;
+        if (state == ServerState.Running && runningSinceUtc is { } since)
+            stateLine = $"运行中（已运行 {FormatDuration(DateTime.UtcNow - since)}）";
+        else if (state == ServerState.Failed)
+            stateLine = "服务异常退出" +
+                (server.LastExitCode is { } code ? $"（退出码 {code}）" : "") +
+                (lastRunDuration is { } duration ? $"，退出前已运行 {FormatDuration(duration)}" : "");
+        else if (busyOperation != BusyOperation.None)
+            stateLine = AppStateFactory.BusyTitle(busyOperation).TrimEnd('…');
+        else stateLine = server.Detail;
+        var security = config is null ? null : $"白名单{(config.Whitelist ? "开" : "关")} · 认证{(config.BasicAuth || config.UserAccounts ? "开" : "未开")}";
+        string? extra = null;
+        if (state == ServerState.Occupied && config is not null && QueryOccupier(config.Port) is { } owner)
+            extra = $"占用进程：{owner.Name} (PID {owner.ProcessId})";
+        var text = Diagnostics.Build(stateLine, config, branch, security, extra,
+            settings.AutoRestartServer, watchdogRestartCount,
+            lastWatchdogRestartAt?.ToString("HH:mm"), lastMaintenance, logLines);
+        try { Clipboard.SetText(text); }
+        catch (ExternalException) { ShowToast("复制失败，剪贴板被其他程序占用。", ToastKind.Warning); return; }
+        ShowToast("已复制诊断信息", ToastKind.Success);
+        await FlashCheck(copyDiagButton);
+    }
+
+    private static async Task FlashCheck(ThemedIconButton button)
+    {
+        var original = button.Glyph;
+        button.Glyph = Icons.Check;
+        button.Invalidate();
         await Task.Delay(1500);
-        if (IsDisposed || copyLogButton.IsDisposed) return;
-        copyLogButton.Glyph = original;
-        copyLogButton.Invalidate();
+        if (button.IsDisposed || button.Disposing) return;
+        button.Glyph = original;
+        button.Invalidate();
+    }
+
+    /// <summary>
+    /// Maps the selected text back to the full source lines so copied text keeps
+    /// complete timestamps even though the view collapses them. The view holds one
+    /// hard line per rendered entry, so text lines align with renderedEntries by index.
+    /// </summary>
+    private string SelectedLogText()
+    {
+        var text = logView.Text;
+        if (renderedEntries.Count == 0 || text.Length == 0) return logView.SelectedText;
+        var selStart = Math.Clamp(logView.SelectionStart, 0, text.Length);
+        var selEnd = Math.Clamp(logView.SelectionStart + logView.SelectionLength, 0, text.Length);
+        var lines = text.Split('\n');
+        var result = new List<string>();
+        var offset = 0;
+        for (var i = 0; i < lines.Length && offset <= selEnd; i++)
+        {
+            var lineEnd = offset + lines[i].Length;
+            if (lineEnd >= selStart && i < renderedEntries.Count) result.Add(renderedEntries[i].Source);
+            offset = lineEnd + 1;
+        }
+        return string.Join("\n", result);
+    }
+
+    private void CancelMaintenance()
+    {
+        if (maintenanceCancel is not { IsCancellationRequested: false }) return;
+        if (currentStepIndex != 0)
+        {
+            ShowToast("此阶段无法安全取消（npm 半安装会损坏 node_modules）。", ToastKind.Warning);
+            return;
+        }
+        maintenanceCancel.Cancel();
+        log.Write("管理器", busyOperation == BusyOperation.Updating ? "用户取消了本次更新（预检阶段）。" : "用户取消了本次依赖修复（预检阶段）。");
+    }
+
+    private void OnStepChanged(int index, StepStatus status)
+    {
+        if (index < 0 || index >= currentSteps.Count) return;
+        currentSteps[index] = currentSteps[index] with { Status = status };
+        if (status == StepStatus.Active) currentStepIndex = index;
+        UpdateDisplay();
+    }
+
+    private void UpdateBusyElapsed()
+    {
+        if (busyOperation == BusyOperation.None || !progressFlow.Visible || hiddenToTray)
+        {
+            elapsedLabel.Text = "";
+            return;
+        }
+        var elapsed = DateTime.UtcNow - busySinceUtc;
+        elapsedLabel.Text = elapsed < TimeSpan.FromSeconds(1) ? "" : "· " + FormatElapsed(elapsed);
+    }
+
+    private void UpdateCompactMode()
+    {
+        var compact = Width < S(680);
+        if (compact == compactMode) return;
+        compactMode = compact;
+        logSearch.Visible = !compact;
+        searchToggleButton.Visible = compact;
+        checkUpdateButton.Text = compact ? "检查" : "检查更新";
+        updateButton.Text = compact ? "更新" : "更新 ST";
+        repairButton.Text = compact ? "修复" : "依赖修复";
+    }
+
+    private void OpenSearchPopup()
+    {
+        if (searchPopup is { IsDisposed: false })
+        {
+            searchPopup.Box.FocusInput();
+            return;
+        }
+        searchPopup = new SearchPopup { Box = { Text = logSearch.Text } };
+        searchPopup.Box.TextChanged += (_, _) => { if (searchPopup is { IsDisposed: false }) logSearch.Text = searchPopup.Box.Text; };
+        searchPopup.Box.NavigateRequested += forward => NavigateSearch(forward ? 1 : -1);
+        var anchor = searchToggleButton.PointToScreen(new Point(0, searchToggleButton.Height + S(4)));
+        var area = Screen.FromControl(this).WorkingArea;
+        searchPopup.Location = new Point(
+            Math.Min(Math.Max(area.Left + S(8), anchor.X - S(80)), area.Right - searchPopup.Width - S(8)),
+            Math.Min(anchor.Y, area.Bottom - searchPopup.Height - S(8)));
+        searchPopup.Show(this);
+        searchPopup.Box.FocusInput();
+    }
+
+    private void NavigateSearch(int direction)
+    {
+        if (searchMatches.Count == 0) return;
+        searchMatchIndex = ((searchMatchIndex + direction) % searchMatches.Count + searchMatches.Count) % searchMatches.Count;
+        var (offset, length) = searchMatches[searchMatchIndex];
+        logView.SelectionStart = offset;
+        logView.SelectionLength = length;
+        logView.ScrollToCaret();
+        UpdateLogCount();
+    }
+
+    private void ApplySearchHighlights()
+    {
+        searchMatches.Clear();
+        searchMatchIndex = -1;
+        var query = logSearch.Text.Trim();
+        if (query.Length == 0) return;
+        var text = logView.Text;
+        var index = 0;
+        while ((index = text.IndexOf(query, index, StringComparison.CurrentCultureIgnoreCase)) >= 0)
+        {
+            searchMatches.Add((index, query.Length));
+            index += query.Length;
+        }
+        if (searchMatches.Count == 0) return;
+        foreach (var (offset, length) in searchMatches)
+        {
+            logView.SelectionStart = offset;
+            logView.SelectionLength = length;
+            logView.SelectionBackColor = Theme.Current.AccentSoft;
+            logView.SelectionColor = Theme.Current.TextPrimary;
+            logView.SelectionFont = Typography.MonoBold;
+        }
+        // Land on the newest match so it is on screen without scrolling.
+        searchMatchIndex = searchMatches.Count - 1;
+        var (activeOffset, activeLength) = searchMatches[searchMatchIndex];
+        logView.SelectionStart = activeOffset;
+        logView.SelectionLength = activeLength;
+        logView.ScrollToCaret();
+    }
+
+    private void UpdateLogCount()
+    {
+        var query = logSearch.Text.Trim();
+        if (query.Length > 0)
+        {
+            logCount.Visible = true;
+            logCount.Text = searchMatches.Count == 0
+                ? "0 处"
+                : searchMatchIndex >= 0 ? $"{searchMatchIndex + 1} / {searchMatches.Count}" : $"{searchMatches.Count} 处";
+            return;
+        }
+        var filtering = logSources.SelectedIndex > 0;
+        logCount.Visible = filtering;
+        if (filtering) logCount.Text = $"{logLines.Count(Matches)} 条";
+    }
+
+    private void OpenReadme()
+    {
+        var directory = AppContext.BaseDirectory;
+        for (var i = 0; i < 5 && directory is not null; i++)
+        {
+            var candidate = Path.Combine(directory, "README.md");
+            if (File.Exists(candidate)) { OpenPath(candidate); return; }
+            directory = Path.GetDirectoryName(directory.TrimEnd(Path.DirectorySeparatorChar));
+        }
+        OpenPath("https://github.com/wacilimonster-source/SillyTavernDesktop#readme");
+    }
+
+    /// <summary>Floating search input for the compact (600–679) layout (v2 §4.10).</summary>
+    private sealed class SearchPopup : ThemedForm
+    {
+        public SearchPopup() : base(resizable: false)
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            ClientSize = new Size(260, 42);
+            Padding = new Padding(6);
+            BackColor = Theme.Current.Surface;
+            Box.Dock = DockStyle.Fill;
+            Box.Margin = Fill;
+            Controls.Add(Box);
+            Deactivate += (_, _) => Close();
+        }
+
+        public SearchBox Box { get; } = new();
     }
 
     private void TogglePause()
@@ -1302,6 +1754,8 @@ internal sealed class MainForm : ThemedForm
             if (render && Matches(notice)) AppendColored(notice);
         }
         var appended = false;
+        var matchedAppended = false;
+        var searching = logSearch.Text.Length > 0;
         var budget = render ? Stopwatch.StartNew() : null;
         var limit = render ? 400 : 4000;
         var processed = 0;
@@ -1313,12 +1767,23 @@ internal sealed class MainForm : ThemedForm
             {
                 logLines.Add(line);
                 if (logLines.Count > 10000) logLines.RemoveRange(0, Math.Min(500, logLines.Count - 10000 + 499));
-                if (render && Matches(line)) { AppendColored(line); appended = true; }
+                if (render && Matches(line))
+                {
+                    AppendColored(line);
+                    appended = true;
+                    if (searching) matchedAppended = true;
+                }
                 processed++;
             }
         }
         finally { if (render) ResumeLogRedraw(); }
         if (!appended) return;
+        // While searching, appended matches must be highlighted and counted; a rebuild is cheap enough.
+        if (matchedAppended)
+        {
+            RebuildLog();
+            return;
+        }
         logView.SelectionStart = logView.TextLength;
         logView.SelectionLength = 0;
         logView.ScrollToCaret();
@@ -1335,25 +1800,42 @@ internal sealed class MainForm : ThemedForm
         try
         {
             logView.Clear();
+            renderedEntries.Clear();
+            lastRenderedDate = null;
             var batch = visible.ToList();
             if (truncated)
                 batch.Insert(0, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [管理器] 仅显示最近 800 条匹配日志，完整记录见日志文件。");
             AppendColoredBatch(batch);
+            if (!pausedScroll)
+            {
+                logView.SelectionStart = logView.TextLength;
+                logView.SelectionLength = 0;
+                logView.ScrollToCaret();
+            }
+            ApplySearchHighlights();
         }
         finally
         {
             logView.ResumeLayout();
             ResumeLogRedraw();
         }
-        if (!pausedScroll)
-        {
-            logView.SelectionStart = logView.TextLength;
-            logView.SelectionLength = 0;
-            logView.ScrollToCaret();
-        }
-        var filtering = logSearch.Text.Length > 0 || logSources.SelectedIndex > 0;
-        logCount.Visible = filtering;
-        if (filtering) logCount.Text = $"{logLines.Count(Matches)} 条";
+        UpdateLogCount();
+    }
+
+    private static string DateSeparatorText(DateTime stamp) =>
+        $"──────────── {stamp.Month} 月 {stamp.Day} 日 ────────────";
+
+    private void AppendDateSeparatorIfNeeded(DateTime stamp)
+    {
+        var date = stamp.ToString("yyyy-MM-dd");
+        if (date == lastRenderedDate) return;
+        lastRenderedDate = date;
+        var separator = DateSeparatorText(stamp);
+        renderedEntries.Add((separator, true));
+        logView.SelectionStart = logView.TextLength;
+        logView.SelectionLength = 0;
+        logView.SelectionColor = Theme.Current.TextTertiary;
+        logView.AppendText(separator + Environment.NewLine);
     }
 
     private void AppendColored(string line)
@@ -1362,12 +1844,15 @@ internal sealed class MainForm : ThemedForm
         var start = logView.TextLength;
         logView.SelectionStart = start;
         logView.SelectionLength = 0;
-        if (!TryParseLogLine(line, out var time, out var source, out var message))
+        if (!TryParseLogLine(line, out var stamp, out var time, out var source, out var message))
         {
+            renderedEntries.Add((line, false));
             logView.SelectionColor = p.TextPrimary;
             logView.AppendText(line + Environment.NewLine);
             return;
         }
+        AppendDateSeparatorIfNeeded(stamp);
+        renderedEntries.Add((line, false));
         logView.SelectionColor = p.TextTertiary;
         logView.AppendText(time + "  ");
         logView.SelectionColor = source switch
@@ -1398,13 +1883,25 @@ internal sealed class MainForm : ThemedForm
         rtf.Append(@"}\viewkind4\uc1\pard\f0\fs").Append(fontSize.ToString(CultureInfo.InvariantCulture)).Append(' ');
         foreach (var line in lines)
         {
-            if (!TryParseLogLine(line, out var time, out var source, out var message))
+            if (!TryParseLogLine(line, out var stamp, out var time, out var source, out var message))
             {
+                renderedEntries.Add((line, false));
                 rtf.Append(@"\cf5 ");
                 AppendRtfText(rtf, line);
                 rtf.Append(@"\par").Append('\n');
                 continue;
             }
+            var date = stamp.ToString("yyyy-MM-dd");
+            if (date != lastRenderedDate)
+            {
+                lastRenderedDate = date;
+                var separator = DateSeparatorText(stamp);
+                renderedEntries.Add((separator, true));
+                rtf.Append(@"\cf1 ");
+                AppendRtfText(rtf, separator);
+                rtf.Append(@"\par").Append('\n');
+            }
+            renderedEntries.Add((line, false));
             rtf.Append(@"\cf1 ");
             AppendRtfText(rtf, time + "  ");
             rtf.Append(@"\cf").Append(source switch { "服务" => '2', "维护" => '3', _ => '4' }).Append(' ');
@@ -1441,8 +1938,9 @@ internal sealed class MainForm : ThemedForm
         }
     }
 
-    private static bool TryParseLogLine(string line, out string time, out string source, out string message)
+    private static bool TryParseLogLine(string line, out DateTime stamp, out string time, out string source, out string message)
     {
+        stamp = DateTime.MinValue;
         time = source = message = "";
         if (line.Length < 22 || line[0] != '[') return false;
         var close = line.IndexOf(']');
@@ -1453,7 +1951,9 @@ internal sealed class MainForm : ThemedForm
         if (rest.Length < 3 || rest[0] != '[') return false;
         var close2 = rest.IndexOf(']');
         if (close2 < 0) return false;
-        time = timestamp.Date == DateTime.Today ? timestamp.ToString("HH:mm:ss") : timestamp.ToString("MM-dd HH:mm:ss");
+        // The date itself comes from the separator rows; lines only carry the clock time.
+        stamp = timestamp;
+        time = timestamp.ToString("HH:mm:ss");
         source = rest[1..close2];
         message = rest[(close2 + 1)..].TrimStart();
         return true;
@@ -1465,7 +1965,22 @@ internal sealed class MainForm : ThemedForm
         Location = new Point(Math.Max(area.Left, area.Right - Width - S(12)), Math.Max(area.Top, area.Bottom - Height - S(12)));
     }
 
-    private void HideToTray() { hiddenToTray = true; Hide(); WindowState = FormWindowState.Normal; }
+    private bool firstTrayHide = true;
+
+    private void HideToTray()
+    {
+        hiddenToTray = true;
+        Hide();
+        WindowState = FormWindowState.Normal;
+        // One-time hint promised by the phase-1 design; only on an explicit hide from a visible window.
+        if (firstTrayHide && !autoStarted)
+        {
+            firstTrayHide = false;
+            tray.BalloonTipTitle = "SillyTavern 管理器仍在后台运行";
+            tray.BalloonTipText = "窗口已收起到系统托盘，双击托盘图标可随时打开；服务不受影响。";
+            tray.ShowBalloonTip(3000);
+        }
+    }
 
     private void RestoreWindow()
     {
@@ -1554,7 +2069,12 @@ internal sealed class MainForm : ThemedForm
             HideToTray();
             return true;
         }
-        if (keyData == (Keys.Control | Keys.F)) { logSearch.FocusInput(); return true; }
+        if (keyData == (Keys.Control | Keys.F))
+        {
+            if (compactMode) OpenSearchPopup();
+            else logSearch.FocusInput();
+            return true;
+        }
         if (keyData == (Keys.Control | Keys.End)) { ResumeScroll(); return true; }
         if (keyData == Keys.F5) { _ = RefreshEnvironmentAsync(); return true; }
         if (keyData == (Keys.Control | Keys.Oemcomma)) { ShowSettings(); return true; }
@@ -1641,6 +2161,9 @@ internal sealed class MainForm : ThemedForm
             logSearchTimer.Stop(); logSearchTimer.Dispose();
             watchdogTimer.Stop(); watchdogTimer.Dispose();
             managerUpdateTimer.Stop(); managerUpdateTimer.Dispose();
+            busyTimer.Stop(); busyTimer.Dispose();
+            if (searchPopup is { IsDisposed: false }) searchPopup.Dispose();
+            maintenanceCancel?.Dispose();
             managerUpdateLifetime.Cancel(); autoUpdateCheck.Cancel(); managerUpdates?.Dispose();
             log.LineWritten -= OnLogLine; server.Changed -= OnServerChanged; PendingManagerUpdateStore.Changed -= OnPendingUpdateStoreChanged;
             tray.Visible = false; tray.Dispose(); activeTrayIcon?.Dispose(); trayMenu.Dispose(); toolTip.Dispose();

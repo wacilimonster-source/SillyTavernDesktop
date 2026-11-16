@@ -12,6 +12,9 @@ internal sealed class AppSettings
     public bool AutoUpdateManager { get; set; } = true;
     public bool AutoRestartServer { get; set; } = true;
 
+    /// <summary>0 = follow the system, 1 = always light, 2 = always dark.</summary>
+    public int Appearance { get; set; }
+
     /// <summary>Set when a corrupt settings file was moved aside during the last Load.</summary>
     public static string? RecoveryNotice { get; private set; }
 

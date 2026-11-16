@@ -38,6 +38,15 @@ internal sealed class TrayHeaderPanel : Control
     }
 }
 
+internal static class TrayMenuTags
+{
+    public static bool IsDanger(object? tag) =>
+        tag as string == "danger" || (tag is ValueTuple<string?, string?> pair && pair.Item1 == "danger");
+
+    public static string? Hint(object? tag) =>
+        tag is ValueTuple<string?, string?> pair && !string.IsNullOrEmpty(pair.Item2) ? pair.Item2 : null;
+}
+
 internal sealed class TrayMenuRenderer : ToolStripProfessionalRenderer
 {
     public TrayMenuRenderer() : base(new TrayColorTable())
@@ -66,7 +75,7 @@ internal sealed class TrayMenuRenderer : ToolStripProfessionalRenderer
     {
         if (!e.Item.Selected) return;
         var p = Theme.Current;
-        var danger = e.Item.Tag as string == "danger";
+        var danger = TrayMenuTags.IsDanger(e.Item.Tag);
         var bounds = new Rectangle(4, 1, e.Item.Width - 8, e.Item.Height - 2);
         Draw.FillRounded(e.Graphics, bounds, 6, danger ? p.DangerSoft : p.AccentSoft);
     }
@@ -75,14 +84,25 @@ internal sealed class TrayMenuRenderer : ToolStripProfessionalRenderer
     {
         var p = Theme.Current;
         var color = !e.Item.Enabled ? p.TextDisabled
-            : e.Item.Tag as string == "danger" ? p.DangerText
+            : TrayMenuTags.IsDanger(e.Item.Tag) ? p.DangerText
             : p.TextPrimary;
         var rect = e.TextRectangle;
         if (rect.Width <= 0 || rect.Height <= 0)
             rect = new Rectangle(e.Item.Bounds.X + 34, e.Item.Bounds.Y, e.Item.Bounds.Width - 40, e.Item.Bounds.Height);
-        TextRenderer.DrawText(e.Graphics, e.Text, e.Item.Font, rect, color,
-            TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine |
-            TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        var hint = TrayMenuTags.Hint(e.Item.Tag);
+        var flags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine |
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter;
+        if (hint is not null)
+        {
+            var hintSize = TextRenderer.MeasureText(hint, Typography.Caption, new Size(4000, 100), TextFormatFlags.NoPrefix);
+            TextRenderer.DrawText(e.Graphics, e.Text, e.Item.Font,
+                new Rectangle(rect.X, rect.Y, Math.Max(0, rect.Width - hintSize.Width - 10), rect.Height), color, flags);
+            TextRenderer.DrawText(e.Graphics, hint, Typography.Caption,
+                new Rectangle(Math.Max(rect.X, rect.Right - hintSize.Width), rect.Y, hintSize.Width, rect.Height),
+                p.TextTertiary, flags);
+            return;
+        }
+        TextRenderer.DrawText(e.Graphics, e.Text, e.Item.Font, rect, color, flags);
     }
 
     protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
