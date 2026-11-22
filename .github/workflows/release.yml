@@ -158,6 +158,8 @@ jobs:
           $env:ST_TRAY_TEST_MANAGER_CURRENT_EXE = "$env:RUNNER_TEMP/manager-old/SillyTavernTray.exe"
           dotnet run --project tests/TraySmokeTests/TraySmokeTests.csproj -c Release
           if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
+          dotnet test tests/TrayUnitTests/TrayUnitTests.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'Unit tests failed.' }
 
       - name: Build and package
         id: package

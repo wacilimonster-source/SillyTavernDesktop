@@ -102,11 +102,12 @@ SillyTavern 很好用，但每天的开场白通常是：打开文件夹、找�
 项目使用 .NET 10 Windows 桌面框架和 .NET 10 SDK。
 
 ```powershell
+dotnet test 'tests\TrayUnitTests\TrayUnitTests.csproj' -c Release
 dotnet run --project 'tests\TraySmokeTests\TraySmokeTests.csproj' -c Release
 dotnet publish 'SillyTavernTray.csproj' -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o 'publish\win-x64'
 ```
 
-发布文件是自包含的 Windows x64 程序，不要求目标电脑另行安装 .NET；仍需要可用的 Node.js、npm 和 Git。测试使用临时目录、临时 Git 仓库和隔离的注册表键，不操作实际 SillyTavern 安装或真正的登录启动项。
+发布文件是自包含的 Windows x64 程序，不要求目标电脑另行安装 .NET；仍需要可用的 Node.js、npm 和 Git。单元测试覆盖纯逻辑（日志轮转、发布解析、看门狗、状态映射）；冒烟测试使用临时目录、临时 Git 仓库和隔离的注册表键，不操作实际 SillyTavern 安装或真正的登录启动项。CI 在 push / PR 时自动运行构建与单元测试。
 
 发布新版本推荐直接在 GitHub 上完成：
 

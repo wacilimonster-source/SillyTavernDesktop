@@ -18,13 +18,14 @@ internal sealed class AppSettings
     /// <summary>Set when a corrupt settings file was moved aside during the last Load.</summary>
     public static string? RecoveryNotice { get; private set; }
 
+    // Standard install locations only; the personal candidate list is intentionally short —
+    // anything unusual is entered once in settings and persisted.
     private static string FindDefaultInstallDirectory()
     {
         var candidates = new[]
         {
             Path.Combine(AppContext.BaseDirectory, "SillyTavern"),
             Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "SillyTavern")),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "GitHub", "SillyTavern"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "SillyTavern"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "SillyTavern"),
             @"C:\SillyTavern"

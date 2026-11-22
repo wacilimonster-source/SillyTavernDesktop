@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -5,8 +6,6 @@ namespace SillyTavernTray;
 
 internal sealed class AppLog
 {
-    private const long MaximumBytes = 5L * 1024 * 1024;
-    private const int MaximumFiles = 10;
     // The live view only needs recent context; one megabyte of the current file covers it
     // without sweeping every rotated file (55 MB worst case) at startup.
     private const long TailScanBytes = 1024 * 1024;
@@ -18,6 +17,7 @@ internal sealed class AppLog
     private StreamWriter? writer;
     private bool directoryReady;
     private long writtenBytes;
+    private string? currentDate;
 
     public void Write(string source, string message)
     {
@@ -25,12 +25,13 @@ internal sealed class AppLog
         {
             if (raw.Length == 0) continue;
             var clean = EscapeSequence.Replace(raw, "");
-            var line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [{source}] {clean}";
+            var now = DateTime.Now;
+            var line = $"[{now:yyyy-MM-dd HH:mm:ss}] [{source}] {clean}";
             lock (sync)
             {
                 try
                 {
-                    AppendLine(line);
+                    AppendLine(line, now);
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
@@ -45,12 +46,29 @@ internal sealed class AppLog
 
     // A persistent writer replaces the per-line CreateDirectory/Exists/stat/append syscall chain
     // that used to run on every server-output line under this same lock.
-    private void AppendLine(string line)
+    private void AppendLine(string line, DateTime now)
     {
         if (!directoryReady)
         {
             Directory.CreateDirectory(DirectoryPath);
             directoryReady = true;
+        }
+        var stampDate = now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        if (currentDate is null)
+        {
+            // First write since process start: the current file may still hold a previous
+            // day (the last session ran before midnight). Archive it so each day starts
+            // with a clean file (WinSW-style daily rotation). A restart within the same
+            // day keeps appending, so the startup tail still shows the previous session.
+            currentDate = stampDate;
+            var lastWriteDate = TryGetLastWriteDate(CurrentPath);
+            if (lastWriteDate is { } previous && previous != stampDate) RollOver(now);
+        }
+        else if (stampDate != currentDate)
+        {
+            currentDate = stampDate;
+            if (writer is not null) { writer.Dispose(); writer = null; }
+            RollOver(now);
         }
         if (writer is null)
         {
@@ -62,25 +80,64 @@ internal sealed class AppLog
         }
         writer.WriteLine(line);
         writtenBytes += Encoding.UTF8.GetByteCount(line) + 2; // Environment.NewLine is CRLF on Windows.
-        if (writtenBytes < MaximumBytes) return;
+        if (writtenBytes < LogRotationPolicy.MaximumBytes) return;
+        // Size rotation within the day: close, archive under a time-suffixed name, continue fresh.
         writer.Dispose();
         writer = null;
-        Rotate();
+        RollOver(now);
     }
 
-    private void Rotate()
+    /// <summary>
+    /// Archives the current log file as a dated file and lets the next write start a fresh
+    /// one. The writer must already be closed. A locked file (a helper still holds it)
+    /// propagates the IOException to the caller's catch, which reopens the current file;
+    /// rotation then retries on a later line.
+    /// </summary>
+    private void RollOver(DateTime now)
     {
-        var oldest = CurrentPath + "." + (MaximumFiles - 1);
-        if (File.Exists(oldest)) File.Delete(oldest);
-        for (var i = MaximumFiles - 2; i >= 1; i--)
+        if (writer is not null) throw new InvalidOperationException("RollOver requires a closed writer.");
+        if (File.Exists(CurrentPath))
         {
-            var previous = CurrentPath + "." + i;
-            if (File.Exists(previous)) File.Move(previous, CurrentPath + "." + (i + 1), true);
+            var archive = Path.Combine(DirectoryPath, LogRotationPolicy.ResolveArchiveName(now, ListArchives()));
+            File.Move(CurrentPath, archive, overwrite: false);
+            writtenBytes = 0;
         }
-        File.Move(CurrentPath, CurrentPath + ".1", true);
+        // Enumerate on disk so retention only ever touches real archive files.
+        foreach (var name in LogRotationPolicy.ExcessArchives(ListArchives()))
+        {
+            try { File.Delete(Path.Combine(DirectoryPath, name)); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
     }
 
-    /// <summary>Tail of the current log only; the rotated files remain on disk for full history.</summary>
+    private static string? TryGetLastWriteDate(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return null;
+            return File.GetLastWriteTime(path).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    private List<string> ListArchives()
+    {
+        var names = new List<string>();
+        try
+        {
+            foreach (var path in Directory.EnumerateFiles(DirectoryPath, "tray*.log", SearchOption.TopDirectoryOnly))
+            {
+                var name = Path.GetFileName(path);
+                if (name != "tray.log") names.Add(name); // tray-*.log archives and legacy tray.log.N backups.
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        return names;
+    }
+
+    /// <summary>Tail of the current log only; the archived files remain on disk for full history.</summary>
     public IReadOnlyList<string> ReadRecent(int maximumLines = 10000)
     {
         var lines = new Queue<string>();

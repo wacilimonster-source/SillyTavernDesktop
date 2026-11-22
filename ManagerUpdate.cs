@@ -105,8 +105,7 @@ internal static class PendingManagerUpdateStore
 
 internal sealed class ManagerUpdateService : IDisposable
 {
-    internal const string AssetName = "SillyTavernTray-win-x64.exe";
-    internal const string LatestUrl = "https://api.github.com/repos/wacilimonster-source/SillyTavernDesktop/releases/latest";
+    private static string LatestUrl => ManagerDistribution.LatestApiUrl;
     private const long MaxAssetBytes = 300L * 1024 * 1024;
     private readonly HttpClient client;
     private readonly bool ownsClient;
@@ -198,10 +197,10 @@ internal sealed class ManagerUpdateService : IDisposable
             (root.TryGetProperty("prerelease", out var pre) && pre.GetBoolean())) throw new InvalidDataException("管理器发行版本尚未正式发布。");
         var tag = root.GetProperty("tag_name").GetString() ?? "";
         if (!ManagerVersion.TryParse(tag, out var version) || !tag.StartsWith('v')) throw new InvalidDataException("管理器版本号无效。");
-        var expectedPath = "/wacilimonster-source/SillyTavernDesktop/releases/download/" + tag + "/" + AssetName;
+        var expectedPath = ManagerDistribution.DownloadPath(tag);
         foreach (var asset in root.GetProperty("assets").EnumerateArray())
         {
-            if (asset.GetProperty("name").GetString() != AssetName) continue;
+            if (asset.GetProperty("name").GetString() != ManagerDistribution.AssetName) continue;
             var urlText = asset.GetProperty("browser_download_url").GetString();
             var digest = asset.TryGetProperty("digest", out var hashValue) ? hashValue.GetString() ?? "" : "";
             var size = asset.GetProperty("size").GetInt64();

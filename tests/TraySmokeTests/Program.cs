@@ -414,8 +414,8 @@ internal static class TestProgram
     private static string ReleaseJson(string tag, long size, string hash) => JsonSerializer.Serialize(new
     {
         tag_name = tag, draft = false, prerelease = false,
-        assets = new[] { new { name = ManagerUpdateService.AssetName, size, digest = "sha256:" + hash,
-            browser_download_url = $"https://github.com/wacilimonster-source/SillyTavernDesktop/releases/download/{tag}/{ManagerUpdateService.AssetName}" } }
+        assets = new[] { new { name = ManagerDistribution.AssetName, size, digest = "sha256:" + hash,
+            browser_download_url = $"https://github.com/{ManagerDistribution.RepoOwner}/{ManagerDistribution.RepoName}/releases/download/{tag}/{ManagerDistribution.AssetName}" } }
     });
 
     private static async Task VerifyManagerUpdaterAsync(string temp, string work, string node, string newExe, string oldExe, AppLog log)
@@ -574,7 +574,7 @@ internal static class TestProgram
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            if (request.RequestUri?.AbsoluteUri == ManagerUpdateService.LatestUrl)
+            if (request.RequestUri?.AbsoluteUri == ManagerDistribution.LatestApiUrl)
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(json, Encoding.UTF8, "application/json") });
             if (request.RequestUri?.Host == "github.com")
             {
