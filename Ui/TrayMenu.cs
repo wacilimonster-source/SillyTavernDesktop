@@ -14,6 +14,9 @@ internal sealed class TrayHeaderPanel : Control
                  ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         Width = 248;
         Height = 46;
+        // Match the host's own erase colour to the painted surface; otherwise WM_ERASEBKGND
+        // can flash the inherited control grey through before OnPaint runs.
+        BackColor = Theme.Current.Surface;
         AccessibleRole = AccessibleRole.StaticText;
         AccessibleName = "SillyTavern 状态";
         Theme.Bind(this);
@@ -56,7 +59,11 @@ internal sealed class TrayMenuRenderer : ToolStripProfessionalRenderer
 
     protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
     {
-        e.Graphics.Clear(Theme.Current.Surface);
+        // Clear() ignores the clip rectangle and repaints the whole window surface, which
+        // stomps on the popup's shadow/edge pixels. Filling the client rectangle keeps the
+        // repaint inside the region the renderer actually owns.
+        using var brush = new SolidBrush(Theme.Current.Surface);
+        e.Graphics.FillRectangle(brush, e.ToolStrip.ClientRectangle);
     }
 
     protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
@@ -68,7 +75,8 @@ internal sealed class TrayMenuRenderer : ToolStripProfessionalRenderer
 
     protected override void OnRenderImageMargin(ToolStripRenderEventArgs e)
     {
-        e.Graphics.Clear(Theme.Current.Surface);
+        using var brush = new SolidBrush(Theme.Current.Surface);
+        e.Graphics.FillRectangle(brush, e.AffectedBounds);
     }
 
     protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)

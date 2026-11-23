@@ -36,6 +36,8 @@ internal sealed partial class MainForm : ThemedForm
     private bool configReadFailed;
     private bool reallyClosing, bannerDismissed;
     private volatile bool stopSignalThread;
+    // Signalled from Dispose so the signal thread wakes immediately instead of timing out.
+    private readonly ManualResetEvent stopSignalEvent = new(false);
     private bool hiddenToTray;
     private bool firstTrayHide = true;
 
@@ -153,7 +155,10 @@ internal sealed partial class MainForm : ThemedForm
         trayMenu.ImageScalingSize = new Size(S(16), S(16));
         trayMenu.Font = Typography.Body;
         trayMenu.DropShadowEnabled = true;
-        trayMenu.Opened += (_, _) => Dwm.Apply(trayMenu.Handle);
+        // The menu is fully self-drawn (TrayMenuRenderer) and already gets a native drop
+        // shadow. Applying DWMWA_WINDOW_CORNER_PREFERENCE to this popup made DWM clip the
+        // corners while WinForms kept painting a square border into the same surface, which
+        // left stale pixels around the edges after the menu closed.
         BuildTrayMenu();
         tray = new NotifyIcon { Visible = true, ContextMenuStrip = trayMenu, Text = "SillyTavern 管理器" };
         tray.DoubleClick += (_, _) => RestoreWindow();
@@ -194,13 +199,15 @@ internal sealed partial class MainForm : ThemedForm
         Resize += (_, _) => { PositionToast(); UpdateCompactMode(); if (WindowState == FormWindowState.Minimized) HideToTray(); };
         _ = Task.Run(() =>
         {
-            // Polling with a timeout keeps this thread from sitting in an unbreakable wait that
-            // races Dispose; an escaping ObjectDisposedException here would kill the whole process.
+            // Blocking on the handles keeps this thread fully asleep; the old 250 ms timeout
+            // woke it roughly 345 000 times a day just to re-check a flag.
+            WaitHandle[] handles = [showSignal, stopSignalEvent];
             while (!stopSignalThread)
             {
                 try
                 {
-                    if (!showSignal.WaitOne(250) || stopSignalThread) continue;
+                    if (WaitHandle.WaitAny(handles) != 0) break; // stopSignalEvent won
+                    if (stopSignalThread) break;
                     TryUi(RestoreWindow);
                 }
                 catch (ObjectDisposedException) { break; }
@@ -352,6 +359,9 @@ internal sealed partial class MainForm : ThemedForm
     private void HideToTray()
     {
         hiddenToTray = true;
+        // Nothing is rendered while hidden; slow the log drain down instead of stopping it,
+        // so the live view still has recent context when the window comes back.
+        logTimer.Interval = TrayFlushInterval;
         Hide();
         WindowState = FormWindowState.Normal;
         // One-time hint promised by the phase-1 design; only on an explicit hide from a visible window.
@@ -369,6 +379,7 @@ internal sealed partial class MainForm : ThemedForm
         if (IsDisposed) return;
         var wasHidden = hiddenToTray;
         hiddenToTray = false;
+        logTimer.Interval = ActiveFlushInterval;
         Show();
         WindowState = FormWindowState.Normal;
         Activate();
@@ -472,8 +483,9 @@ internal sealed partial class MainForm : ThemedForm
         logView.ApplyTheme();
         foreach (var (item, glyph) in trayGlyphs)
         {
+            // Tag is a (danger?, shortcutHint?) tuple, so a plain string cast never matches.
             var old = item.Image;
-            item.Image = Icons.ToBitmap(glyph, S(16), item.Tag as string == "danger" ? p.DangerText : p.TextSecondary);
+            item.Image = Icons.ToBitmap(glyph, S(16), TrayMenuTags.IsDanger(item.Tag) ? p.DangerText : p.TextSecondary);
             old?.Dispose();
         }
         trayMenu.Invalidate();
@@ -500,9 +512,9 @@ internal sealed partial class MainForm : ThemedForm
     {
         if (disposing)
         {
-            // The signal thread notices the flag within 250 ms; no wake-up event is needed and
-            // touching the handle here would race the polling loop above.
+            // Wake the signal thread so it leaves WaitAny immediately instead of timing out.
             stopSignalThread = true;
+            try { stopSignalEvent.Set(); } catch (ObjectDisposedException) { }
             logTimer.Stop(); logTimer.Dispose();
             logSearchTimer.Stop(); logSearchTimer.Dispose();
             watchdogTimer.Stop(); watchdogTimer.Dispose();
@@ -513,6 +525,9 @@ internal sealed partial class MainForm : ThemedForm
             managerUpdateLifetime.Cancel(); autoUpdateCheck.Cancel(); managerUpdates?.Dispose();
             log.LineWritten -= OnLogLine; server.Changed -= OnServerChanged; PendingManagerUpdateStore.Changed -= OnPendingUpdateStoreChanged;
             tray.Visible = false; tray.Dispose(); activeTrayIcon?.Dispose(); trayMenu.Dispose(); toolTip.Dispose();
+            // Released last: the signal thread may still be parked on it and is expected to
+            // observe the dispose as its exit condition.
+            stopSignalEvent.Dispose();
         }
         base.Dispose(disposing);
     }

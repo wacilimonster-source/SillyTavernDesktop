@@ -14,7 +14,12 @@ internal sealed partial class MainForm
 {
     private readonly ConcurrentQueue<string> queuedLines = new();
     private readonly List<string> logLines = new();
-    private readonly System.Windows.Forms.Timer logTimer = new() { Interval = 200 };
+    private const int MaxLogLines = 10000;
+    // While the window sits in the tray nothing is rendered, so the queue can be drained at a
+    // fifth of the rate with no visible effect and a much quieter background.
+    private const int ActiveFlushInterval = 200;
+    private const int TrayFlushInterval = 1000;
+    private readonly System.Windows.Forms.Timer logTimer = new() { Interval = ActiveFlushInterval };
     private readonly System.Windows.Forms.Timer logSearchTimer = new() { Interval = 220 };
     private int omittedLiveLines;
     private readonly List<(string Source, bool IsSeparator)> renderedEntries = [];
@@ -39,6 +44,10 @@ internal sealed partial class MainForm
 
     private void FlushLogQueue()
     {
+        // Nothing queued and nothing dropped: skip the filter/render bookkeeping entirely.
+        // The timer fires five times a second even while the window sits in the tray, and
+        // each idle pass used to re-read the search box and the source combo.
+        if (queuedLines.IsEmpty && Volatile.Read(ref omittedLiveLines) == 0) return;
         var render = !hiddenToTray && !pausedScroll;
         var omitted = Interlocked.Exchange(ref omittedLiveLines, 0);
         if (omitted > 0)
@@ -60,7 +69,6 @@ internal sealed partial class MainForm
                    && queuedLines.TryDequeue(out var line))
             {
                 logLines.Add(line);
-                if (logLines.Count > 10000) logLines.RemoveRange(0, Math.Min(500, logLines.Count - 10000 + 499));
                 if (render && Matches(line))
                 {
                     AppendColored(line);
@@ -69,6 +77,10 @@ internal sealed partial class MainForm
                 }
                 processed++;
             }
+            // Trim once after the drain. Checking per line turned a large backlog into
+            // repeated O(n) list shuffles for every dequeued entry.
+            if (logLines.Count > MaxLogLines)
+                logLines.RemoveRange(0, logLines.Count - MaxLogLines);
         }
         finally { if (render) ResumeLogRedraw(); }
         if (!appended) return;

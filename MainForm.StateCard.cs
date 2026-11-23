@@ -13,6 +13,7 @@ internal sealed partial class MainForm
     private DateTime occupierQueriedUtc = DateTime.MinValue;
     private IReadOnlyList<ViewAction>? lastActionSet;
     private StatusTone? lastActionTone;
+    private string? lastTrayText;
 
     private (int ProcessId, string Name)? QueryOccupier(int port)
     {
@@ -194,11 +195,21 @@ internal sealed partial class MainForm
         traySettings.Enabled = busyOperation == BusyOperation.None;
         trayExit.Enabled = busyOperation == BusyOperation.None;
 
-        trayHeader.Status = state.Title + (config?.Port is int port ? $" · 端口 {port}" : "");
-        trayHeader.Subtext = config is null ? $"管理器 {ManagerVersion.Current}" : $"ST {config.Version} · 管理器 {ManagerVersion.Current}";
-        trayHeader.DotColor = p.ToneColor(state.Tone);
-        trayHeader.Invalidate();
-        tray.Text = ("SillyTavern：" + server.Detail)[..Math.Min(63, ("SillyTavern：" + server.Detail).Length)];
+        var headerStatus = state.Title + (config?.Port is int port ? $" · 端口 {port}" : "");
+        var headerSubtext = config is null ? $"管理器 {ManagerVersion.Current}" : $"ST {config.Version} · 管理器 {ManagerVersion.Current}";
+        var headerDot = p.ToneColor(state.Tone);
+        if (headerStatus != trayHeader.Status || headerSubtext != trayHeader.Subtext || headerDot != trayHeader.DotColor)
+        {
+            trayHeader.Status = headerStatus;
+            trayHeader.Subtext = headerSubtext;
+            trayHeader.DotColor = headerDot;
+            trayHeader.Invalidate();
+        }
+        // Every assignment here re-sends NIM_MODIFY to the shell, so skip identical values;
+        // that keeps the notification area from repainting on unrelated state updates.
+        var trayText = "SillyTavern：" + server.Detail;
+        if (trayText.Length > 63) trayText = trayText[..63];
+        if (trayText != lastTrayText) { tray.Text = trayText; lastTrayText = trayText; }
         SetTrayIcon(TrayStatus.ColorFor(state.Tone));
         pauseButton.Glyph = pausedScroll ? Icons.Play : Icons.Pause;
         UpdateCompactMode();
